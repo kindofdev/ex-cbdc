@@ -1,4 +1,4 @@
-# DAML Application example: Central Bank Digital Currency (CBDC)
+# DAML Application example - Central Bank Digital Currency (CBDC)
 
 ## Disclaimer
 - This is a WIP.
