@@ -2,19 +2,20 @@
 
 ## Disclaimer
 - This is a WIP.
-- Not fullly tested for production use.
+- Not fully tested for production use.
 
 <br>
 
 ## Overview
 
-This project has been inspired by Digital Asset "Reference Application: Central Bank Digital Currency (CBDC)". The challenge is to develop a similar application but using Daml finance library and DAML interfaces.
+This project has been inspired by Digital Asset "Reference Application: Central Bank Digital Currency (CBDC)" project. The challenge is to develop a similar application using Daml finance library and DAML interfaces.
 
 This project only develops the DAML model and tests for the model. UI has been discarded.
 
 Current DAML SDK version: 2.6.0
 
 https://github.com/digital-asset/ex-cbdc
+
 https://docs.daml.com/daml/reference/interfaces.html
 
 <br>
@@ -60,7 +61,7 @@ https://docs.daml.com/daml/reference/interfaces.html
 <br>
 <br>
 
-### Bank.Role requests cb cdbc injection.
+### Bank.Role requests cdbc injection from Cb.
 <br>
 
 ![](images/06_bank_role_request_cbdc_injection.jpg)
@@ -68,7 +69,7 @@ https://docs.daml.com/daml/reference/interfaces.html
 <br>
 <br>
 
-### Bank.Role requests cb cdbc extraction.
+### Bank.Role requests cdbc extraction from Cb.
 <br>
 
 ![](images/07_bank_role_request_cbdc_extraction.jpg)
@@ -92,7 +93,7 @@ https://docs.daml.com/daml/reference/interfaces.html
 <br>
 <br>
 
-### Provider.Role creates an invoice.
+### Provider.Role creates an invoice for a customer.
 <br>
 
 ![](images/10_provider_role_create_invoice.jpg)
@@ -108,10 +109,10 @@ https://docs.daml.com/daml/reference/interfaces.html
 <br>
 <br>
 
-## How to build
+## How to build it
 <br>
 
-### Build fat project
+### Build the fat project.
 <br>
 
 ```shell
@@ -120,7 +121,7 @@ daml build -j
 
 <br>
 
-### Build packages
+### Build the packages.
 <br>
 
 ```shell
@@ -129,7 +130,7 @@ make
 
 <br>
 
-## How to test
+## How to test it.
 <br>
 
 ```shell
