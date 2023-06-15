@@ -1,0 +1,2 @@
+*.shell linguist-detectable=false
+*.daml linguist-language=Haskell
