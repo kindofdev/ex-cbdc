@@ -1,0 +1,24 @@
+module Finance.Holding.Util where
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+import Interface.Certificate.Certificate qualified as Certificate
+import Interface.Certificate.Types (Sector(..))
+import Interface.Finance.Account.Certifiable qualified as AccountC
+
+checkValidEarmarkedTransfer : BaseHolding.I -> Sector -> AccountKey -> AccountKey  -> Update ()
+checkValidEarmarkedTransfer baseHolding sector senderAccount receiverAccount
+  | sector == NoSector = pure ()
+  | otherwise = do
+      vAccountC <- Account.exerciseInterfaceByKey @AccountC.I receiverAccount receiverAccount.custodian
+                     AccountC.GetView with viewer = receiverAccount.custodian
+      case vAccountC.certificateKeyOpt of
+        None -> abort "Transfering earmarked cbdc to a non-cerfified account"
+        Some certKey -> do
+          cert <- (.certificateKey) . (.certificateView) . snd <$> fetchByKey @Certificate.R certKey
+          assertMsg "Transfering earmarked cbdc to a incorrect cerfified account - invalid sector" $
+            cert.sector == sector
+          assertMsg "Transfering earmarked cbdc to a invalid cerfified account" $
+            cert.provider `elem` (signatory baseHolding)

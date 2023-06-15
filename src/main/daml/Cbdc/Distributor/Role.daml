@@ -1,0 +1,105 @@
+module Cbdc.Distributor.Role where
+
+import DA.Assert
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Billing.Invoice.Factory qualified as Invoice
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Certificate.Types
+import Interface.Certificate.Factory qualified as CertificateFactory
+import Interface.Finance.Account.Certifiable  qualified as AccountC
+
+import Cbdc.Provider.Role qualified as Provider
+import Cbdc.Util.Common
+
+template Role
+  with
+    cb : Party
+    distributor : Party
+    sector : Sector
+    certificateFactoryCid : ContractId CertificateFactory.F
+    invoiceFactoryCid : ContractId Invoice.F
+    observers : PartiesMap
+  where
+    signatory cb, distributor
+    observer Disclosure.flattenObservers observers
+    key (cb, distributor) : (Party, Party)
+    maintainer key._2
+
+    ensure sector /= NoSector
+
+    nonconsuming choice InviteProvider : ContractId ProviderRoleInvite
+      with
+        provider : Party
+      controller distributor
+      do
+        -- Create a copy of certificateFactory for provider (keeping privacy between providers)
+        certificateFactoryCid' <- create =<< fetch certificateFactoryCid
+        certificateFactoryCid'' <- CertificateFactory.disclose
+          (show provider, Set.singleton provider)
+          (Set.singleton cb)
+          certificateFactoryCid'
+        create ProviderRoleInvite with certificateFactoryCid = certificateFactoryCid''; ..
+
+
+template ProviderRoleInvite
+  with
+    cb : Party
+    distributor : Party
+    provider : Party
+    sector : Sector
+    certificateFactoryCid : ContractId CertificateFactory.F
+    invoiceFactoryCid : ContractId Invoice.F
+  where
+    signatory distributor, cb
+    observer provider
+
+    choice ProviderRoleInvite_Accept
+      : (ContractId Provider.Role, CertificateKey, ContractId AccountC.I)
+      with
+        providerAtCbAccount : AccountKey
+      controller provider
+      do
+        certificateFactoryV <- view <$> fetch certificateFactoryCid
+        -- Sanity checks
+        certificateFactoryV.provider === cb
+        certificateFactoryV.distributor === distributor
+        certificateFactoryV.sector === sector
+        assertExistence @Role "DistributorRole not found" (cb, distributor)
+        assertMsg "Account owner does not match certificate owner" $
+          providerAtCbAccount.owner == provider
+        assertMsg "Account custodian does not match cb" $
+          providerAtCbAccount.custodian == cb
+
+        certificateKey <- exercise certificateFactoryCid CertificateFactory.Create with
+          observers = Map.empty
+          owner = provider
+          ..
+
+        -- Not needed after creating the certificate
+        archive certificateFactoryCid
+
+        -- Add certificate to provider's account
+        accountCCid <- Account.exerciseInterfaceByKey @AccountC.I providerAtCbAccount cb
+          AccountC.AddCertificate with ..
+
+        roleCid <- create Provider.Role with ..
+        pure (roleCid, certificateKey, accountCCid)
+
+    choice ProviderRoleInvite_WithDraw : ()
+      controller distributor
+      do
+        archive certificateFactoryCid
+        pure ()
+
+    choice ProviderRoleInvite_Reject : ()
+      controller provider
+      do
+        archive certificateFactoryCid
+        pure ()
+

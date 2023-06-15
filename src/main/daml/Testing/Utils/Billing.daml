@@ -1,0 +1,56 @@
+module Testing.Utils.Billing where
+
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import Daml.Script
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), PartiesMap)
+
+import Interface.Billing.Invoice.Factory qualified as Invoice
+import Interface.Billing.Invoice.Invoice (LastPaidInvoice)
+import Interface.Billing.Invoice.Invoice qualified as Invoice
+import Interface.Certificate.Certificate qualified as Certificate
+
+import Cbdc.Provider.Role qualified as Provider
+
+import Testing.Utils.Account
+import Testing.Utils.Factory
+
+createInvoice
+  : Party -> Party -> Party -> Party -> Decimal -> Date
+ -> Script (ContractId Invoice.I, ContractId Account.I, ContractId Certificate.I)
+createInvoice distributor provider public customer price date =
+  submitMulti [provider] [public] $ exerciseByKeyCmd @Provider.Role (distributor, provider)
+    Provider.CreateInvoice with ..
+
+createInvoiceWithoutDistributor
+  : Party -> Party -> PartiesMap -> AccountKey -> AccountKey -> Decimal -> Date
+ -> Script (ContractId Invoice.I)
+createInvoiceWithoutDistributor provider public pub customerAtCbAccount
+  providerAtCbAccount price date
+  = do
+  let discloseContext = "invoice-for-" <> show customerAtCbAccount.owner
+  dicloseAccount providerAtCbAccount (discloseContext, Set.singleton customerAtCbAccount.owner)
+  invoiceFactoryCid <- createInvoiceFactory provider pub
+  submit provider $ exerciseCmd invoiceFactoryCid Invoice.Create with
+    customer= customerAtCbAccount.owner
+    providerAccount = providerAtCbAccount
+    certificateKeyOpt = None
+    date
+    price
+    observers = Map.empty
+
+payInvoice
+  : AccountKey -> Party -> ContractId Invoice.I -> [ContractId Fungible.I]
+ -> Script (ContractId LastPaidInvoice, [ContractId Fungible.I], Optional Text)
+payInvoice customerAccount public invoiceCid holdingCids =
+  submitMulti [customerAccount.owner] [public] $
+    exerciseCmd invoiceCid Invoice.Pay with ..
+
+payInvoiceFails
+  : AccountKey -> Party -> ContractId Invoice.I -> [ContractId Fungible.I] -> Script ()
+payInvoiceFails customerAccount public invoiceCid holdingCids =
+  submitMultiMustFail [customerAccount.owner] [public] $
+    exerciseCmd invoiceCid Invoice.Pay with ..

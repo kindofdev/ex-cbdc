@@ -1,0 +1,66 @@
+module Interface.Billing.Invoice.Invoice where
+
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+import Interface.Certificate.Certificate (CertificateKey)
+
+-- | Type synonym for `Invoice`.
+type I = Invoice
+
+-- | Type synonym for `View`.
+type V = View
+
+type Warning = Text
+
+type PayResult = (ContractId LastPaidInvoice, [ContractId Fungible.I], Optional Warning)
+
+-- | View for `Invoice`.
+data View = View
+  with
+    customer : Party
+    providerAccount : AccountKey
+    certificateKeyOpt : Optional CertificateKey
+    date : Date
+    price : Decimal
+  deriving (Eq, Show)
+
+interface Invoice where
+  viewtype V
+
+  pay : ContractId Invoice -> Pay -> Update PayResult
+
+  nonconsuming choice GetView : View
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+        -- ^ The party fetching the view.
+    controller viewer
+    do
+      pure $ view this
+
+  choice Pay : PayResult
+    with
+      customerAccount : AccountKey
+      holdingCids : [ContractId Fungible.I]
+    controller (view this).customer
+    do
+      pay this self arg
+
+
+template LastPaidInvoice
+  with
+    invoiceV : View
+  where
+    let provider = invoiceV.providerAccount.owner
+        customer = invoiceV.customer
+
+    signatory provider, customer
+    key (provider, customer): (Party, Party)
+    maintainer key._1
+
+    choice LastPaidInvoice_Archive : ()
+      controller provider
+      do
+        pure ()
+

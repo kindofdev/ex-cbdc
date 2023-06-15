@@ -1,0 +1,103 @@
+module Cbdc.Operator.Role where
+
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Factory qualified as Holding
+import Daml.Finance.Interface.Instrument.Base.Instrument qualified as BaseInstrument
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), Id(..), InstrumentKey(..), PartiesMap)
+
+import Interface.Certificate.Types (Sector(..))
+import Interface.Finance.Account.Factory qualified as Account
+import Interface.Finance.Instrument.Cbdc.Factory qualified as Cbdc
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+import Cbdc.CentralBank.Role qualified as CentralBank
+
+template Role
+  with
+    operator : Party
+  where
+    signatory operator
+    key operator : Party
+    maintainer key
+
+    nonconsuming choice InviteCentralBank : ContractId CentralBankRoleInvite
+      with
+        cb : Party
+        cbdcLabel : Text
+      controller operator
+      do
+        let
+          cbAtCbAccount = AccountKey with
+            custodian = cb
+            owner = cb
+            id = Id $ show cb <> "@" <> show cb
+        create CentralBankRoleInvite with ..
+
+template CentralBankRoleInvite
+  with
+    operator : Party
+    cbdcLabel : Text
+    cbAtCbAccount : AccountKey
+  where
+    let cb = cbAtCbAccount.owner
+    signatory operator
+    observer cb
+    ensure cbAtCbAccount.custodian == cbAtCbAccount.owner
+
+    choice CentralBankRoleInvite_Accept
+      : (ContractId CentralBank.Role, ContractId Account.I, [InstrumentKey])
+      with
+        cbdcFactoryCid : ContractId Cbdc.F
+        accountFactoryCid : ContractId Account.F
+        holdingFactoryCid : ContractId Holding.F
+        cbdcIntrumentsObservers : PartiesMap
+        roleObservers : PartiesMap
+      controller cb
+      do
+        now <- getTime
+        -- Create cbdc instruments
+        instrumentCids <- forA [minBound .. maxBound] $ \sector ->
+          exercise cbdcFactoryCid Cbdc.Create with
+            depository = operator
+            issuer = cb
+            version = "1"
+            observers = cbdcIntrumentsObservers
+            earmark = sector
+            validAsOf = now
+            description = "cbdc earmarked for " <> show sector
+            cbdcLabel
+
+        let instrumentsAllowedToBeDebited = Set.singleton InstrumentKey with
+              depository = operator
+              issuer = cb
+              id = Cbdc.getId NoSector
+              version = "1"
+
+        -- Create account cb@cb
+        cbAtCbAccountCid <- exercise accountFactoryCid Account.Create with
+          account = cbAtCbAccount
+          controllers = Account.Controllers with
+            outgoing = Set.singleton cbAtCbAccount.owner
+            incoming = Set.singleton cbAtCbAccount.custodian
+          description = show cbAtCbAccount.owner <> "@" <> show cbAtCbAccount.custodian
+          observers = Map.empty
+          supportCreditRequest = False
+          supportDebitRequest = False
+          ..
+
+        instrumentKeys <- forA instrumentCids $
+          fmap (BaseInstrument.getKey . toInterface) . fetch
+
+        cbCid <- create CentralBank.Role with observers = roleObservers; ..
+        pure (cbCid, cbAtCbAccountCid, instrumentKeys)
+
+    choice CentralBankRoleInvite_Reject : ()
+      controller cb
+      do pure ()
+
+    choice CentralBankRoleInvite_Withdraw : ()
+      controller operator
+      do pure ()

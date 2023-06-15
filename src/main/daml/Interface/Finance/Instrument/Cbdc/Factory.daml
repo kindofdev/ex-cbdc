@@ -1,0 +1,55 @@
+module Interface.Finance.Instrument.Cbdc.Factory where
+
+import Daml.Finance.Interface.Types.Common.Types (InstrumentKey, PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Certificate.Types (Sector)
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+-- | Type synonym for `Factory`.
+type F = Factory
+
+-- | Type synonym for `View`.
+type V = View
+
+-- View of `Factory`.
+data View = View
+  with
+    provider : Party
+      -- ^ The provider of the `Factory`.
+  deriving (Eq, Show)
+
+-- | Factory interface to instantiate cbdc.
+interface Factory requires Disclosure.I where
+  viewtype V
+
+  create' : Create -> Update (ContractId Cbdc.I)
+    -- ^ Implementation of `Create` choice.
+  remove : Remove -> Update ()
+    -- ^ Implementation of `Remove` choice.
+
+  nonconsuming choice Create : ContractId Cbdc.I
+    -- ^ Create a new cbdc.
+    with
+      cbdcLabel : Text
+      description : Text
+      validAsOf : Time
+      depository : Party
+      issuer : Party
+      version : Text
+      earmark : Sector
+      -- ^ An earmark.
+      observers : PartiesMap
+        -- ^ The instrument's observers.
+    controller depository, issuer
+    do
+      create' this arg
+
+  nonconsuming choice Remove : ()
+    -- ^ Archive a cbdc.
+    with
+      instrument : InstrumentKey
+        -- ^ The instrument's key.
+    controller instrument.depository, instrument.issuer
+      do
+        remove this arg

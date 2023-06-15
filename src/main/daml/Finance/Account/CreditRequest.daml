@@ -1,0 +1,24 @@
+module Finance.Account.CreditRequest where
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), InstrumentQuantity)
+
+import Interface.Finance.Account.CreditRequest (CreditRejection(..))
+import Interface.Finance.Account.CreditRequest qualified as CreditRequest
+
+template CreditRequest
+  with
+    account : AccountKey
+    quantity : InstrumentQuantity
+  where
+    signatory account.owner
+    observer account.custodian
+
+    interface instance CreditRequest.I for CreditRequest where
+      view = CreditRequest.View with ..
+      accept = do
+        coerceInterfaceContractId <$>
+          Account.exerciseInterfaceByKey @Account.I account (account.custodian)
+            Account.Credit with ..
+      reject CreditRequest.Reject {reason} =
+        create CreditRejection with ..

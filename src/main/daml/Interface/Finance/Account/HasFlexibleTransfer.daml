@@ -1,0 +1,50 @@
+module Interface.Finance.Account.HasFlexibleTransfer where
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+-- | Type synonym for `HasFlexibleTransfer`.
+type I = HasFlexibleTransfer
+
+-- | Type synonym for `View`.
+type V = View
+
+-- | View for `HasFlexibleTransfer`.
+data View = View
+  with
+    account : AccountKey
+  deriving (Eq, Show)
+
+-- | Interface for an account which can tranfers holdings in a flexible
+-- manner.
+interface HasFlexibleTransfer requires Account.I, Disclosure.I where
+  viewtype V
+
+  transfer : Transfer -> Update (ContractId Fungible.I)
+
+  nonconsuming choice GetView : View
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+        -- ^ The party fetching the view.
+    controller viewer
+    do
+      pure $ view this
+
+  nonconsuming choice Transfer : ContractId Fungible.I
+    -- ^ Gives the account's owner the right to transfer a given amount.
+    -- The amount to transfer does not necessarily to match a holding amount.
+    -- In case the amount does not match, the holdings provided will be merged/split accordingly.
+    -- This choice returns the holding created for the receiver with the exact amount given.
+    with
+      receiverAccount : AccountKey
+        -- ^ The account id to which the holding will be transferred to.
+      amount : Optional Decimal
+      holdingCids : [ContractId Fungible.I]
+        -- ^ The holdings that will be consumed.
+      isEarmarked : Bool
+    controller (view this).account.owner
+    do
+      transfer this arg

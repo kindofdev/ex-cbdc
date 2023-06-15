@@ -1,0 +1,41 @@
+module Billing.Invoice.Factory where
+
+import DA.Assert
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Types.Common.Types (PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+import Daml.Finance.Util.Disclosure (addObserversImpl, removeObserversImpl, setObserversImpl)
+
+import Interface.Billing.Invoice.Factory qualified as Invoice
+
+import Billing.Invoice.Invoice (Invoice(..))
+
+-- | Template used to create invoices.
+template Factory
+  with
+    provider : Party
+      -- ^ The factory's provider.
+    observers : PartiesMap
+      -- ^ The factory's observers.
+  where
+    signatory provider
+    observer Disclosure.flattenObservers observers
+
+    interface instance Invoice.F for Factory where
+      view = Invoice.View with ..
+      create' Invoice.Create {..} =
+          toInterfaceContractId <$> create Invoice with ..
+      remove Invoice.Remove{..} = do
+        invoiceV <- view <$> fetch invoiceCid
+        -- Sanity checks
+        invoiceV.providerAccount === providerAccount
+
+        archive invoiceCid
+
+    interface instance Disclosure.I for Factory where
+      view = Disclosure.View with disclosureControllers = Set.singleton provider; observers
+      setObservers = setObserversImpl @Factory @Disclosure.I this None
+      addObservers = addObserversImpl @Factory @Disclosure.I this None
+      removeObservers = removeObserversImpl @Factory @Disclosure.I this None
+

@@ -1,0 +1,53 @@
+module Finance.Instrument.Cbdc.Factory where
+
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Instrument.Base.Instrument qualified as BaseInstrument
+import Daml.Finance.Interface.Types.Common.Types (PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+import Daml.Finance.Util.Disclosure (addObserversImpl, removeObserversImpl, setObserversImpl)
+
+import Interface.Finance.Instrument.Cbdc.Factory qualified as Cbdc
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc (I)
+
+import Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+-- | Type synonym for `Factory`.
+type F = Factory
+
+-- | Factory template for instrument creation.
+template Factory
+  with
+    provider : Party
+      -- ^ The factory's provider.
+    observers : PartiesMap
+      -- ^ The factory's observers.
+  where
+    signatory provider
+    observer Disclosure.flattenObservers observers
+
+    interface instance Cbdc.Factory for Factory where
+      view = Cbdc.View with provider
+      create' Cbdc.Create{..} = do
+        cid <- toInterfaceContractId @Cbdc.I <$>
+          create Cbdc.Instrument with
+            depository
+            issuer
+            version
+            description
+            validAsOf
+            earmark
+            observers
+        BaseInstrument.createReference depository (toInterfaceContractId cid)
+        pure cid
+      remove Cbdc.Remove{instrument} = do
+        (refCid, ref) <- fetchByKey @BaseInstrument.R instrument
+        instrumentCid <- exercise refCid BaseInstrument.GetCid with viewer = instrument.depository
+        archive $ fromInterfaceContractId @Cbdc.Instrument instrumentCid
+        archive refCid
+
+    interface instance Disclosure.I for Factory where
+      view = Disclosure.View with disclosureControllers = Set.singleton provider; observers
+      setObservers = setObserversImpl @Factory @Disclosure.I this None
+      addObservers = addObserversImpl @Factory @Disclosure.I this None
+      removeObservers = removeObserversImpl @Factory @Disclosure.I this None

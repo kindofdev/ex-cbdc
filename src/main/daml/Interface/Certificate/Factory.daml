@@ -1,0 +1,59 @@
+module Interface.Certificate.Factory where
+
+import Daml.Finance.Interface.Types.Common.Types (Parties, PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Certificate.Types (Sector(..))
+
+-- | Type synonym for `Factory`.
+type F = Factory
+
+-- | Type synonym for `View`.
+type V = View
+
+-- View of `Factory`.
+data View = View
+  with
+    provider : Party
+    distributor : Party
+    sector : Sector
+  deriving (Eq, Show)
+
+-- | Interface that allows implementing templates to create certificates.
+interface Factory requires Disclosure.I where
+  viewtype V
+
+  create' : Create -> Update CertificateKey
+    -- ^ Implementation of `Create` choice.
+  remove : Remove -> Update ()
+    -- ^ Implementation of `Remove` choice.
+
+  nonconsuming choice Create : CertificateKey
+    -- ^ Create a new certificate.
+    with
+      owner : Party
+      observers : PartiesMap
+        -- ^ The certificate's observers.
+    controller (view this).distributor, (view this).provider, owner
+    do
+      create' this arg
+
+  nonconsuming choice Remove : ()
+    -- ^ Archive an certificate.
+    with
+      certificateKey : CertificateKey
+    controller (view this).distributor, (view this).provider
+      do
+        remove this arg
+
+
+-- | Disclose factory.
+disclose : (Text, Parties) -> Parties -> ContractId Factory -> Update (ContractId Factory)
+disclose observersToAdd disclosers factoryCid = coerceInterfaceContractId <$>
+  exercise (toInterfaceContractId @Disclosure.I factoryCid) Disclosure.AddObservers with ..
+
+-- | Undisclose factory.
+undisclose : (Text, Parties) -> Parties -> ContractId Factory -> Update (Optional (ContractId Factory))
+undisclose observersToRemove disclosers factoryCid = fmap coerceInterfaceContractId <$>
+  exercise (toInterfaceContractId @Disclosure.I factoryCid) Disclosure.RemoveObservers with ..

@@ -1,0 +1,52 @@
+module Testing.Utils.Bank where
+
+import Daml.Script
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Types.Common.Types
+  (AccountKey(..), InstrumentQuantity, PartiesMap)
+
+import Interface.Finance.Account.DebitRequest qualified as DebitRequest
+import Interface.Finance.Account.CreditRequest qualified as CreditRequest
+
+import Cbdc.Bank.Role qualified as Bank
+import Cbdc.CentralBank.Role qualified as CentralBank
+
+createBankRole
+  : AccountKey -> Party -> Party -> PartiesMap
+ -> Script (ContractId Bank.Role, ContractId Account.I)
+createBankRole bankAtCbAccount operator public pub = do
+  let cb = bankAtCbAccount.custodian
+      bank = bankAtCbAccount.owner
+  invite <- submit cb $ exerciseByKeyCmd @CentralBank.Role (operator, cb)
+    CentralBank.InviteBank with ..
+  submitMulti [bank] [public] $
+    exerciseCmd invite CentralBank.BankRoleInvite_Accept with roleObservers = pub
+
+requestCbdcInjection
+  : AccountKey -> Party -> Party -> InstrumentQuantity
+ -> Script (ContractId CreditRequest.I)
+requestCbdcInjection bankAtCbAccount operator public quantity =
+  let cb = bankAtCbAccount.custodian
+      bank = bankAtCbAccount.owner
+  in submitMulti [bank] [public] $ exerciseByKeyCmd @Bank.Role (cb, bank)
+    Bank.RequestCbdcInjection with ..
+
+requestCbdcInjectionFails
+  : AccountKey -> Party -> Party -> InstrumentQuantity
+ -> Script ()
+requestCbdcInjectionFails bankAtCbAccount operator public quantity =
+  let cb = bankAtCbAccount.custodian
+      bank = bankAtCbAccount.owner
+  in submitMultiMustFail [bank] [public] $ exerciseByKeyCmd @Bank.Role (cb, bank)
+    Bank.RequestCbdcInjection with ..
+
+requestCbdcExtraction
+  : AccountKey -> Party -> Party -> ContractId BaseHolding.I
+ -> Script (ContractId DebitRequest.I)
+requestCbdcExtraction bankAtCbAccount operator public holdingCid =
+  let cb = bankAtCbAccount.custodian
+      bank = bankAtCbAccount.owner
+  in submitMulti [bank] [public] $ exerciseByKeyCmd @Bank.Role (cb, bank)
+    Bank.RequestCbdcExtraction with ..

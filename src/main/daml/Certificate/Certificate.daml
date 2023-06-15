@@ -1,0 +1,36 @@
+module Certificate.Certificate where
+
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Types.Common.Types (PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+import Daml.Finance.Util.Disclosure (addObserversImpl, removeObserversImpl, setObserversImpl)
+
+import Interface.Certificate.Certificate (CertificateKey(..))
+import Interface.Certificate.Certificate qualified as Certificate
+import Interface.Certificate.Types (Sector(..))
+
+template Certificate
+  with
+    provider : Party
+    distributor : Party
+    owner : Party
+    sector : Sector
+    observers : PartiesMap
+  where
+    signatory provider, distributor, owner
+
+    let certificateKey = CertificateKey with ..
+
+    interface instance Certificate.I for Certificate where
+      view = Certificate.View with ..
+      getKey = certificateKey
+      revoke = do
+        fetchByKey @Certificate.R certificateKey >>= archive . fst
+        pure ()
+
+    interface instance Disclosure.I for Certificate where
+      view = Disclosure.View with disclosureControllers = Set.singleton owner; observers
+      setObservers = setObserversImpl this $ Some (Certificate.disclosureUpdateReference certificateKey)
+      addObservers = addObserversImpl this $ Some (Certificate.disclosureUpdateReference certificateKey)
+      removeObservers = removeObserversImpl this $ Some (Certificate.disclosureUpdateReference certificateKey)

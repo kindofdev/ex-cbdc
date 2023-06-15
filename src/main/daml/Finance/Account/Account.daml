@@ -1,0 +1,155 @@
+module Finance.Account.Account where
+
+import DA.Functor
+import DA.Map qualified as Map
+import DA.Set (Set)
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Factory qualified as HoldingFactory
+import Daml.Finance.Interface.Types.Common.Types (Id, AccountKey(..), InstrumentKey, PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+import Daml.Finance.Util.Disclosure (addObserversImpl, removeObserversImpl, setObserversImpl)
+
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Finance.Account.DebitRequest qualified as DebitRequest
+import Interface.Finance.Account.Certifiable  qualified as AccountC
+import Interface.Finance.Account.CreditRequest qualified as CreditRequest
+import Interface.Finance.Account.Factory qualified as AccountFactory
+import Interface.Finance.Account.HasFlexibleTransfer qualified as HasFlexibleTransfer
+import Interface.Finance.Account.HasHoldingRequest qualified as HasHoldingRequest
+
+import Finance.Account.DebitRequest (DebitRequest(..))
+import Finance.Account.CreditRequest (CreditRequest(..))
+import Finance.Account.Util (checkAndTransferDeposits)
+
+-- | Type synonym for `Account`.
+type T = Account
+
+-- | A relationship between a custodian and an asset owner. It is referenced by holdings.
+template Account
+  with
+    custodian : Party
+      -- ^ The account provider.
+    owner : Party
+      -- ^ The account owner.
+    controllers : Account.Controllers
+      -- ^ Controllers of transfers.
+    id : Id
+      -- ^ Identifier of the account.
+    description : Text
+      -- ^ Description of the account.
+    certificateKeyOpt : Optional CertificateKey
+      -- ^ An optional certificate.
+    supportCreditRequest : Bool
+      -- ^ Indicates whether owner can request credit.
+    supportDebitRequest : Bool
+      -- ^ Indicates whether owner can request debit.
+    instrumentsAllowedToBeDebited : Set InstrumentKey
+      -- ^ The instruments that can be debited.
+    holdingFactoryCid : ContractId HoldingFactory.F
+      -- ^ Associated holding factory.
+    observers : PartiesMap
+      -- ^ Observers.
+  where
+    signatory custodian, owner
+    observer Disclosure.flattenObservers observers
+
+    let account = AccountKey with custodian; owner; id
+
+    interface instance Account.I for Account where
+      asDisclosure = toInterface @Disclosure.I this
+      view = Account.View with custodian; id; owner; holdingFactoryCid; description; controllers
+      getKey = account
+      credit Account.Credit{quantity} =
+        exercise holdingFactoryCid HoldingFactory.Create with
+          instrument = quantity.unit
+          account
+          amount = quantity.amount
+          observers = Map.empty
+      debit Account.Debit{holdingCid} = do
+        vHolding <- view <$> fetch holdingCid
+        assertMsg "accounts must match" $ vHolding.account == account
+        assertMsg "Instrument not allowed to be debited" $
+          vHolding.instrument `Set.member` instrumentsAllowedToBeDebited
+        exercise holdingFactoryCid HoldingFactory.Remove with
+          actors = Set.fromList [account.custodian, account.owner]; holdingCid
+
+    interface instance AccountC.I for Account where
+      asAccount = toInterface @Account.I this
+      view = AccountC.View with ..
+      addCertificate AccountC.AddCertificate {certificateKey} = do
+        cid <- toInterfaceContractId <$> create this with certificateKeyOpt = Some certificateKey
+        updateReference account cid
+        pure $ coerceInterfaceContractId @AccountC.I cid
+      removeCertificate AccountC.RemoveCertificate {certificateKey} = do
+        cid <- toInterfaceContractId <$> create this with certificateKeyOpt = None
+        updateReference account cid
+        pure $ coerceInterfaceContractId @AccountC.I cid
+
+    interface instance HasFlexibleTransfer.I for Account where
+      view = HasFlexibleTransfer.View with ..
+      transfer HasFlexibleTransfer.Transfer {receiverAccount, amount, holdingCids, isEarmarked} = do
+        let nameOfAssets = if isEarmarked then "earmarked" else "non-earmarked"
+        checkAndTransferDeposits account holdingCids amount receiverAccount nameOfAssets account.owner
+
+    interface instance HasHoldingRequest.I for Account where
+      view = HasHoldingRequest.View with ..
+      requestDebit HasHoldingRequest.RequestDebit {holdingCid} = do
+        assertMsg "Account does not support debit request" supportDebitRequest
+        toInterfaceContractId <$> create DebitRequest with ..
+      acceptDebit HasHoldingRequest.AcceptDebit{requestCid} =
+        exercise requestCid DebitRequest.Accept
+      rejectDebit HasHoldingRequest.RejectDebit{reason, requestCid} =
+        exercise requestCid DebitRequest.Reject with ..
+
+      requestCredit HasHoldingRequest.RequestCredit {quantity} = do
+        assertMsg "Account does not support credit request" supportCreditRequest
+        toInterfaceContractId <$> create CreditRequest with ..
+      acceptCredit HasHoldingRequest.AcceptCredit{requestCid} =
+         exercise requestCid CreditRequest.Accept
+      rejectCredit HasHoldingRequest.RejectCredit{reason, requestCid} =
+        exercise requestCid CreditRequest.Reject with ..
+
+
+    interface instance Disclosure.I for Account where
+      view = Disclosure.View with disclosureControllers = Set.fromList [custodian, owner]; observers
+      setObservers = setObserversImpl this $ Some (Account.disclosureUpdateReference account)
+      addObservers = addObserversImpl this $ Some (Account.disclosureUpdateReference account)
+      removeObservers = removeObserversImpl this $ Some (Account.disclosureUpdateReference account)
+
+updateReference : AccountKey -> ContractId Account.I -> Update ()
+updateReference k iCid = void $ exerciseByKey @Account.R k Account.SetCid with newCid = iCid
+
+-- | Template used to create accounts.
+template Factory
+  with
+    provider : Party
+      -- ^ The factory's provider.
+    observers : PartiesMap
+      -- ^ The factory's observers.
+  where
+    signatory provider
+    observer Disclosure.flattenObservers observers
+
+    interface instance AccountFactory.F for Factory where
+      view = AccountFactory.View with provider
+      create' AccountFactory.Create {account; holdingFactoryCid; controllers; observers;
+        description; supportCreditRequest; supportDebitRequest; instrumentsAllowedToBeDebited} = do
+          cid <- toInterfaceContractId <$> create Account with
+            custodian = account.custodian; owner = account.owner; controllers; id = account.id
+            holdingFactoryCid; observers; description; supportCreditRequest; supportDebitRequest
+            instrumentsAllowedToBeDebited; certificateKeyOpt = None
+          Account.createReference account.custodian cid
+          pure cid
+      remove AccountFactory.Remove{account} = do
+        (refCid, ref) <- fetchByKey @Account.R account
+        accountCid <- exercise refCid Account.GetCid with viewer = account.custodian
+        archive $ fromInterfaceContractId @Account accountCid
+        archive refCid
+
+    interface instance Disclosure.I for Factory where
+      view = Disclosure.View with disclosureControllers = Set.singleton provider; observers
+      setObservers = setObserversImpl @Factory @Disclosure.I this None
+      addObservers = addObserversImpl @Factory @Disclosure.I this None
+      removeObservers = removeObserversImpl @Factory @Disclosure.I this None

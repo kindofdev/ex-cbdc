@@ -1,0 +1,31 @@
+module Testing.Utils.Users where
+
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import DA.Text qualified as T
+import Daml.Script
+
+import Testing.Models.Entities
+import Testing.Models.Users
+
+setupPartiesAndUsers : Script UsersForTesting
+setupPartiesAndUsers = do
+  public <- allocateParty "public"
+  usFRB <- allocatePartyAndUser "usFRB" public
+  ecb <- allocatePartyAndUser "ecb" public
+  bankA <- allocatePartyAndUser "bankA" public
+  bankB <- allocatePartyAndUser "bankB" public
+  operator <- allocatePartyAndUser "operator" public
+  provider <- allocatePartyAndUser "provider" public
+  distributor <- allocatePartyAndUser "distributor" public
+  customer <- allocatePartyAndUser "customer" public
+
+  let pub = Map.fromList [("publicParty", Set.singleton public)]
+  pure EntitiesForTesting with ..
+  where
+    allocatePartyAndUser displayName public = do
+      userId <- validateUserId $ T.asciiToLower displayName
+      p <- allocateParty displayName
+      let u = User userId (Some p)
+      createUser u [CanActAs p, CanReadAs public]
+      pure u

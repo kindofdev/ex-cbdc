@@ -1,0 +1,148 @@
+module Testing.Demo.Demo where
+
+import DA.Date qualified as Date
+import DA.Map (Map)
+import DA.Optional
+import DA.Tuple
+import Daml.Script
+
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), InstrumentKey(..))
+
+import Interface.Certificate.Types
+
+import Testing.Models.Entities
+import Testing.Models.Parties
+import Testing.Utils.Account
+import Testing.Utils.Bank
+import Testing.Utils.Billing
+import Testing.Utils.CentralBank
+import Testing.Utils.Distributor
+import Testing.Utils.Operator
+import Testing.Utils.TestUtilities
+import Testing.Utils.Users
+
+data InitData =
+  InitData with
+    parties : PartiesForTesting
+    customerAccount : AccountKey
+    providerAccount : AccountKey
+    usFRB_InstrumentMap : Map Sector InstrumentKey
+
+initDemo : PartiesForTesting -> Script InitData
+initDemo parties@EntitiesForTesting{..} = script do
+  let usFRB_At_usFRB_Account = accountKey usFRB usFRB
+      bankA_At_usFRB_Account = accountKey usFRB bankA
+      bankB_At_usFRB_Account = accountKey usFRB bankB
+      bankA_At_ecb_Account = accountKey ecb bankA
+      bankB_At_ecb_Account = accountKey ecb bankB
+      providerAccount = accountKey usFRB provider
+      customerAccount = accountKey usFRB customer
+
+  let ledgerSetupTask = "Ledger Setup"
+  started ledgerSetupTask
+
+  let task = "Create operator role"
+  started task
+  createOperator operator
+  finished task
+
+  let task = "Create USD FRB role"
+  started task
+  usFRBInstrumentCids <- thd3 <$> createCentralBankRole operator usFRB public pub "USD"
+  usFRB_InstrumentMap <- createSectorToInstrumentMap usFRB usFRBInstrumentCids
+  finished task
+
+  let task = "FRB invites BankA"
+  started task
+  createBankRole bankA_At_usFRB_Account operator public pub
+  finished task
+
+  let task = "FRB invites BankB"
+  started task
+  createBankRole bankB_At_usFRB_Account operator public pub
+  finished task
+
+  let task = "Create EUR ECB role"
+  started task
+  ecbInstrumentCids <- thd3 <$> createCentralBankRole operator ecb public pub "EUR"
+  ecb_InstrumentMap <- createSectorToInstrumentMap ecb ecbInstrumentCids
+  finished task
+
+  let task = "ECB invites BankA"
+  started task
+  createBankRole bankA_At_ecb_Account operator public pub
+  finished task
+
+  let task = "ECB invites BankB"
+  started task
+  createBankRole bankB_At_ecb_Account operator public pub
+  finished task
+
+  let task = "Issue USD to Federal Reserve Bank"
+  started task
+  issueCbdc usFRB operator None 900_000_000.0 usFRB_InstrumentMap
+  finished task
+
+  let task = "Issue EUR to European Central Bank"
+  started task
+  issueCbdc ecb operator None 700_000_000.0 ecb_InstrumentMap
+  finished task
+
+  let earmarkedSetupTask = "Earmarked Cbdc / rent invoice setup"
+  started earmarkedSetupTask
+
+  let task = "Create provider's account"
+  started task
+  createUserAtCentralBank providerAccount operator public
+  finished task
+
+  let task = "Create customer's account"
+  started task
+  createUserAtCentralBank customerAccount operator public
+  finished task
+
+  let task = "Central bank creates Distributor for Housing"
+  started task
+  createDistributorRole usFRB operator distributor public pub Housing
+  finished task
+
+  let task = "Distributor creates Provider with a Housing cerificate"
+  started task
+  createProviderRole usFRB distributor provider public pub providerAccount
+  finished task
+
+  finished earmarkedSetupTask
+  finished ledgerSetupTask
+  pure $ InitData with ..
+
+demo : Script ()
+demo = script do
+  users@EntitiesForTesting{..} <- setupPartiesAndUsers
+  let userToParty provider = fromSomeNote "The User has no Party assigned" provider.primaryParty
+      parties = fmap userToParty users
+  initData@InitData{..} <- initDemo parties
+  let EntitiesForTesting{..} = initData.parties
+      invoiceDate = Date.date 2023 Date.Aug 16
+
+  -- Transfer money from USFRB's account to BankA
+  transferFromCentralbankToBank operator usFRB bankA public 100_000_000.0
+  -- Transfer money from ECB's account to BankB
+  transferFromCentralbankToBank operator ecb bankB public 85_000_000.0
+
+  -- Earmarked Cbdc / rent invoice payment workflow
+  holdingCid <-
+    issueSpecialCbdc usFRB operator public customerAccount Housing 3000.0 usFRB_InstrumentMap
+
+  -- Creation of rent invoice
+  invoiceCid <- fst3 <$> createInvoice distributor provider public customer 1998.0 invoiceDate
+
+  -- Renter pays the rent invoice
+  payInvoice customerAccount public invoiceCid [holdingCid]
+
+  pure ()
+
+started : Action m => Text -> m ()
+started message = debug $ "Started: " <> message
+
+finished : Action m => Text -> m ()
+finished message = debug $ "Finished: " <> message

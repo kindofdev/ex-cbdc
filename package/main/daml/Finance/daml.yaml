@@ -1,0 +1,20 @@
+sdk-version: 2.6.0
+build-options:
+  - --target=1.15
+start-navigator: no
+name: finance
+source: daml
+version: 0.0.1
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - .lib/daml-finance/Daml.Finance.Holding/1.0.2/daml-finance-holding-1.0.2.dar
+  - .lib/daml-finance/Daml.Finance.Interface.Account/1.0.0/daml-finance-interface-account-1.0.0.dar
+  - .lib/daml-finance/Daml.Finance.Interface.Holding/1.0.0/daml-finance-interface-holding-1.0.0.dar
+  - .lib/daml-finance/Daml.Finance.Interface.Instrument.Base/1.0.0/daml-finance-interface-instrument-base-1.0.0.dar
+  - .lib/daml-finance/Daml.Finance.Interface.Types.Common/1.0.0/daml-finance-interface-types-common-1.0.0.dar
+  - .lib/daml-finance/Daml.Finance.Interface.Util/1.0.0/daml-finance-interface-util-1.0.0.dar
+  - .lib/daml-finance/Daml.Finance.Util/2.0.0/daml-finance-util-2.0.0.dar
+  - ../Interface.Certificate/.daml/dist/interface-certificate-0.0.1.dar
+  - ../Interface.Finance/.daml/dist/interface-finance-0.0.1.dar

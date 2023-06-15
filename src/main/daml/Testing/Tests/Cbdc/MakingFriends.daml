@@ -1,0 +1,229 @@
+module Testing.Tests.Cbdc.MakingFriends where
+
+import DA.Assert
+import DA.List qualified as List
+import DA.Map qualified as Map
+import DA.Optional
+import DA.Set qualified as Set
+import Daml.Script
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Factory qualified as Holding
+import Daml.Finance.Interface.Instrument.Base.Instrument qualified as BaseInstrument
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), Id(..), PartiesMap)
+
+import Interface.Certificate.Certificate (CertificateKey(..))
+import Interface.Certificate.Certificate qualified as Certificate
+import Interface.Certificate.Types (Sector(..))
+import Interface.Finance.Account.Factory qualified as Account (F)
+import Interface.Finance.Instrument.Cbdc.Factory qualified as Cbdc (F)
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+import Testing.Models.Entities
+import Testing.Tests.Cbdc.Util
+import Testing.Utils.Account
+import Testing.Utils.CentralBank
+import Testing.Utils.Factory
+import Testing.Utils.Operator
+import Testing.Utils.Parties
+
+import Cbdc.Bank.Role qualified as Bank
+import Cbdc.CentralBank.Role qualified as CentralBank
+import Cbdc.Distributor.Role qualified as Distributor
+import Cbdc.Operator.Role qualified as Operator
+import Cbdc.Provider.Role qualified as Provider
+
+operatorCanInviteCb : Script ()
+operatorCanInviteCb = do
+  parties@EntitiesForTesting{..} <- setupParties
+  Factories{..} <- mkFactories usFRB pub
+  operatorRoleCid <- createOperator operator
+
+  let inviteCb operator cb roleCid cbdcLabel = submit operator $
+        exerciseCmd roleCid Operator.InviteCentralBank with ..
+      cbAtCbAccount = AccountKey with
+        custodian = usFRB
+        owner = usFRB
+        id = Id $ show usFRB <> "@" <> show usFRB
+
+  -- Reject
+  inviteCid <- inviteCb operator usFRB operatorRoleCid "USD"
+  submit usFRB $ exerciseCmd inviteCid Operator.CentralBankRoleInvite_Reject
+  assertTemplateByKeyNonExistence @CentralBank.Role usFRB (operator, usFRB)
+
+  -- Withdraw
+  inviteCid <- inviteCb operator usFRB operatorRoleCid "USD"
+  submit operator $ exerciseCmd inviteCid Operator.CentralBankRoleInvite_Withdraw
+  assertTemplateByKeyNonExistence @CentralBank.Role usFRB (operator, usFRB)
+
+  -- Accept
+  inviteCid <- inviteCb operator usFRB operatorRoleCid "USD"
+  (_, _, instrumentKeys) <-
+    submit usFRB $ exerciseCmd inviteCid Operator.CentralBankRoleInvite_Accept with
+      cbdcIntrumentsObservers = pub
+      roleObservers = pub
+      ..
+  assertTemplateByKeyExistence @CentralBank.Role usFRB (operator, usFRB)
+  assertTemplateByKeyExistence @Account.R usFRB cbAtCbAccount
+  -- Check that instruments have been created
+  earmarks <- forA instrumentKeys \instrumentKey -> do
+    cid <- (.cid) . snd . fromSome <$>
+      queryContractKey @BaseInstrument.R usFRB instrumentKey
+    submit usFRB $ (.earmark) <$>
+      exerciseCmd (coerceInterfaceContractId @Cbdc.I cid) Cbdc.GetView with viewer = usFRB
+  List.sort earmarks === [minBound .. maxBound : Sector]
+
+cbCanInviteUser : Script ()
+cbCanInviteUser = do
+  parties@EntitiesForTesting{..} <- setupParties
+  Factories{..} <- mkFactories usFRB pub
+  operatorRoleCid <- createOperator operator
+  (cbRoleCid, _, _) <- createCentralBankRole operator usFRB public pub "USD"
+
+  let inviteUser cb userAtCbAccount roleCid = submit cb $
+        exerciseCmd roleCid CentralBank.InviteUser with ..
+      userAtCbAccount = AccountKey with
+        owner = customer
+        custodian = usFRB
+        id = Id "customer@usFRB"
+
+  -- Reject
+  inviteCid <- inviteUser usFRB userAtCbAccount cbRoleCid
+  submit customer $ exerciseCmd inviteCid CentralBank.UserInvite_Reject
+  assertTemplateByKeyNonExistence @Account.R customer userAtCbAccount
+
+  -- Withdraw
+  inviteCid <- inviteUser usFRB userAtCbAccount cbRoleCid
+  submit usFRB $ exerciseCmd inviteCid CentralBank.UserInvite_Withdraw
+  assertTemplateByKeyNonExistence @Account.R customer userAtCbAccount
+
+  -- Accept
+  inviteCid <- inviteUser usFRB userAtCbAccount cbRoleCid
+  submitMulti [customer] [public] $ exerciseCmd inviteCid CentralBank.UserInvite_Accept
+  assertTemplateByKeyExistence @Account.R customer userAtCbAccount
+
+cbCanInviteBank : Script ()
+cbCanInviteBank = do
+  parties@EntitiesForTesting{..} <- setupParties
+  Factories{..} <- mkFactories usFRB pub
+  operatorRoleCid <- createOperator operator
+  (cbRoleCid, _, _) <- createCentralBankRole operator usFRB public pub "USD"
+
+  let inviteBank cb bankAtCbAccount roleCid = submit cb $
+        exerciseCmd roleCid CentralBank.InviteBank with ..
+      bankAtCbAccount = AccountKey with
+        owner = bankA
+        custodian = usFRB
+        id = Id "bankA@usFRB"
+
+  -- Reject
+  inviteCid <- inviteBank usFRB bankAtCbAccount cbRoleCid
+  submit bankA $ exerciseCmd inviteCid CentralBank.BankRoleInvite_Reject
+  assertTemplateByKeyNonExistence @Bank.Role usFRB (usFRB, bankA)
+  assertTemplateByKeyNonExistence @Account.R bankA bankAtCbAccount
+
+  -- Withdraw
+  inviteCid <- inviteBank usFRB bankAtCbAccount cbRoleCid
+  submit usFRB $ exerciseCmd inviteCid CentralBank.BankRoleInvite_Withdraw
+  assertTemplateByKeyNonExistence @Bank.Role usFRB (usFRB, bankA)
+  assertTemplateByKeyNonExistence @Account.R bankA bankAtCbAccount
+
+  -- Accept
+  inviteCid <- inviteBank usFRB bankAtCbAccount cbRoleCid
+  submitMulti [bankA] [public] $
+    exerciseCmd inviteCid CentralBank.BankRoleInvite_Accept with
+      roleObservers = pub
+  assertTemplateByKeyExistence @Bank.Role usFRB (usFRB, bankA)
+  assertTemplateByKeyExistence @Account.R bankA bankAtCbAccount
+
+
+cbCanInviteDistributor : Script ()
+cbCanInviteDistributor = do
+  parties@EntitiesForTesting{..} <- setupParties
+  Factories{..} <- mkFactories usFRB pub
+  certificateFactoryCid <- createCertificateFactory usFRB distributor Housing
+    (Map.fromList [(show distributor, Set.singleton distributor)])
+  invoiceFactoryCid <- createInvoiceFactory usFRB pub
+  operatorRoleCid <- createOperator operator
+  (cbRoleCid, _, _) <- createCentralBankRole operator usFRB public pub "USD"
+
+  let inviteDistributor cb sector roleCid = submit cb $
+        exerciseCmd roleCid CentralBank.InviteDistributor with ..
+      inviteDistributorFails cb sector roleCid = submitMustFail cb $
+        exerciseCmd roleCid CentralBank.InviteDistributor with ..
+
+  -- It cannot be created a NoSector distributor role
+  inviteDistributorFails usFRB NoSector cbRoleCid
+
+  -- Reject
+  inviteCid <- inviteDistributor usFRB Housing cbRoleCid
+  submit distributor $ exerciseCmd inviteCid CentralBank.DistributorRoleInvite_Reject
+  assertTemplateByKeyNonExistence @Distributor.Role distributor (usFRB, distributor)
+
+  -- Withdraw
+  inviteCid <- inviteDistributor usFRB Housing cbRoleCid
+  submit usFRB $ exerciseCmd inviteCid CentralBank.DistributorRoleInvite_Withdraw
+  assertTemplateByKeyNonExistence @Distributor.Role distributor (usFRB, distributor)
+
+  -- Accept
+  inviteCid <- inviteDistributor usFRB Housing cbRoleCid
+  submitMulti [distributor] [public] $
+    exerciseCmd inviteCid CentralBank.DistributorRoleInvite_Accept with
+      roleObservers = pub
+      ..
+  assertTemplateByKeyExistence @Distributor.Role distributor (usFRB, distributor)
+
+
+distributorCanInviteProvider : Script ()
+distributorCanInviteProvider = do
+  parties@EntitiesForTesting{..} <- setupParties
+  Factories{..} <- mkFactories usFRB pub
+  invoiceFactoryCid <- createInvoiceFactory usFRB pub
+  operatorRoleCid <- createOperator operator
+  (cbRoleCid, _, _) <- createCentralBankRole operator usFRB public pub "USD"
+  let providerAtCbAccount = accountKey usFRB provider
+  createUserAtCentralBank providerAtCbAccount operator public
+  distributorRoleCid <- createDistributorRole usFRB operator distributor public pub Housing
+
+  -- Reject
+  inviteCid <- submit distributor $
+    exerciseCmd distributorRoleCid Distributor.InviteProvider with ..
+  submit provider $ exerciseCmd inviteCid Distributor.ProviderRoleInvite_Reject
+  assertTemplateByKeyNonExistence @Provider.Role distributor (distributor, provider)
+
+  -- Withdraw
+  inviteCid <- submit distributor $
+    exerciseCmd distributorRoleCid Distributor.InviteProvider with ..
+  submit distributor $ exerciseCmd inviteCid Distributor.ProviderRoleInvite_WithDraw
+  assertTemplateByKeyNonExistence @Provider.Role distributor (distributor, provider)
+
+  -- Accept
+  inviteCid <- submit distributor $
+    exerciseCmd distributorRoleCid Distributor.InviteProvider with ..
+  submitMulti [provider] [public] $
+    exerciseCmd inviteCid Distributor.ProviderRoleInvite_Accept with ..
+  assertTemplateByKeyExistence @Provider.Role distributor (distributor, provider)
+
+  let certificateKey = CertificateKey with
+        provider = usFRB
+        distributor
+        owner = provider
+        sector = Housing
+
+  assertTemplateByKeyExistence @Certificate.R provider certificateKey
+  providerAccountCertificateOpt <- getAccountCertificate providerAtCbAccount
+  Some certificateKey === providerAccountCertificateOpt
+
+
+data Factories = Factories
+  with
+    cbdcFactoryCid : ContractId Cbdc.F
+    accountFactoryCid : ContractId Account.F
+    holdingFactoryCid : ContractId Holding.F
+  deriving (Eq, Show)
+
+mkFactories : Party -> PartiesMap -> Script Factories
+mkFactories provider observers = Factories
+  <$> createCbdcFactory provider observers
+  <*> createAccountFactory provider observers
+  <*> createHoldingFactory provider observers

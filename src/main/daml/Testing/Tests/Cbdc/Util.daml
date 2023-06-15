@@ -1,0 +1,82 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
+module Testing.Tests.Cbdc.Util where
+
+import DA.Assert
+import DA.Map (Map)
+import DA.Optional (isNone, isSome)
+import Daml.Script
+
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), InstrumentKey(..))
+
+import Interface.Certificate.Types
+
+import Testing.Models.Entities
+import Testing.Models.Parties
+import Testing.Utils.Account
+import Testing.Utils.CentralBank
+import Testing.Utils.Distributor
+import Testing.Utils.Operator
+import Testing.Utils.Parties
+import Testing.Utils.TestUtilities
+
+import Cbdc.Bank.Role qualified as Bank
+import Cbdc.CentralBank.Role qualified as CentralBank
+import Cbdc.Distributor.Role qualified as Distributor
+import Cbdc.Operator.Role qualified as Operator
+import Cbdc.Provider.Role qualified as Provider
+
+data Onboarding = Onboarding with
+  customerAtCbAccount : AccountKey
+  providerAtCbAccount : AccountKey
+  cbAtCbAccount : AccountKey
+  bankAAtCbAccount : AccountKey
+  cbInstrumentMap : Map Sector InstrumentKey
+  parties : PartiesForTesting
+  cbRoleCid : ContractId CentralBank.Role
+  bankARoleCid : ContractId Bank.Role
+  operatorRoleCid : ContractId Operator.Role
+  distributorRoleCid : ContractId Distributor.Role
+  providerRoleCid : ContractId Provider.Role
+
+setupRoleHierarchy : Script Onboarding
+setupRoleHierarchy = do
+  -- Participants set up parties
+  parties@EntitiesForTesting{..} <- setupParties
+
+  -- Operator role
+  operatorRoleCid <- createOperator operator
+
+  -- Central Bank role 1
+  (cbRoleCid, _, cbInstrumentCids) <- createCentralBankRole operator usFRB public pub "USD"
+  cbInstrumentMap <- createSectorToInstrumentMap usFRB cbInstrumentCids
+
+  Some cbRole <- queryContractId usFRB cbRoleCid
+  let cbAtCbAccount = cbRole.cbAtCbAccount
+
+  -- Create a provider account at usFRB
+  let providerAtCbAccount = accountKey usFRB provider
+  createUserAtCentralBank providerAtCbAccount operator public
+
+  -- Create a customer account at usFRB
+  let customerAtCbAccount = accountKey usFRB customer
+  createUserAtCentralBank customerAtCbAccount operator public
+
+  -- Create a bank account at usFRB (bankA)
+  let bankAAtCbAccount = accountKey usFRB bankA
+  (bankARoleCid, _) <- createBankAtCentralBank bankAAtCbAccount operator public pub
+
+  -- Central bank creates Distributor for Housing
+  distributorRoleCid <- createDistributorRole usFRB operator distributor public pub Housing
+
+  -- Distributor creates a Provider with a Housing cerificate
+  (providerRoleCid, _, _) <- createProviderRole usFRB distributor provider public pub providerAtCbAccount
+
+  pure Onboarding with ..
+
+
+assertTemplateByKeyExistence : forall t k. (TemplateKey t k) => Party -> k -> Script ()
+assertTemplateByKeyExistence viewer k = queryContractKey @t viewer k >>= (True ===) . isSome
+
+assertTemplateByKeyNonExistence : forall t k. (TemplateKey t k) => Party -> k -> Script ()
+assertTemplateByKeyNonExistence viewer k = queryContractKey @t viewer k >>= (True ===) . isNone

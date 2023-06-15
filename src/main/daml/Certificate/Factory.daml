@@ -1,0 +1,49 @@
+module Certificate.Factory where
+
+import DA.Assert
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Types.Common.Types (PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+import Daml.Finance.Util.Disclosure (addObserversImpl, removeObserversImpl, setObserversImpl)
+
+import Interface.Certificate.Certificate qualified as Certificate
+import Interface.Certificate.Factory qualified as CertificateFactory
+import Interface.Certificate.Types (Sector(..))
+
+import Certificate.Certificate (Certificate(..))
+
+-- | Template used to create certificates.
+template Factory
+  with
+    provider : Party
+    distributor : Party
+    sector : Sector
+    observers : PartiesMap
+      -- ^ The factory's observers.
+  where
+    signatory provider
+    observer distributor, Disclosure.flattenObservers observers
+
+    interface instance CertificateFactory.F for Factory where
+      view = CertificateFactory.View with ..
+      create' CertificateFactory.Create {owner, observers} = do
+          cid <- toInterfaceContractId <$> create Certificate with ..
+          certKey <- Certificate.getKey <$> fetch cid
+          Certificate.createReference distributor cid
+          pure certKey
+      remove CertificateFactory.Remove{certificateKey} = do
+        (refCid, ref) <- fetchByKey @Certificate.R certificateKey
+        let certView = ref.certificateView
+            certificateKey = certView.certificateKey
+        certificateKey.provider === provider
+        certificateKey.distributor === distributor
+        certCid <- exercise refCid Certificate.GetCid with viewer = certificateKey.distributor
+        archive $ fromInterfaceContractId @Certificate certCid
+        archive refCid
+
+    interface instance Disclosure.I for Factory where
+      view = Disclosure.View with disclosureControllers = Set.singleton provider; observers
+      setObservers = setObserversImpl @Factory @Disclosure.I this None
+      addObservers = addObserversImpl @Factory @Disclosure.I this None
+      removeObservers = removeObserversImpl @Factory @Disclosure.I this None

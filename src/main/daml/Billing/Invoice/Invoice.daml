@@ -1,0 +1,86 @@
+module Billing.Invoice.Invoice where
+
+import DA.Optional
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+import Interface.Billing.Invoice.Invoice (LastPaidInvoice(..))
+import Interface.Billing.Invoice.Invoice qualified as Invoice
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Certificate.Certificate qualified as Certificate
+import Interface.Certificate.Types (Sector(..))
+import Interface.Finance.Account.HasFlexibleTransfer qualified as HasFlexibleTransfer
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+import Billing.Invoice.Util
+
+template Invoice
+  with
+    customer : Party
+    providerAccount : AccountKey
+    certificateKeyOpt : Optional CertificateKey
+    date : Date
+    price : Decimal
+  where
+    -- distributor is a signatory in case Invoice is created with a certificate
+    signatory providerAccount.owner :: optional [] (pure . (.distributor)) certificateKeyOpt
+    observer customer
+
+    interface instance Invoice.I for Invoice where
+      view = Invoice.View with ..
+      pay self Invoice.Pay{holdingCids, customerAccount} = do
+        assertMsg "Customer account's owner does not match customer on the invoice" $
+          customerAccount.owner == customer
+        assertMsg "Custodian for the two accounts needs to be the same" $
+          customerAccount.custodian == providerAccount.custodian
+        holdingVs <- fmap (view . toInterface @BaseHolding.I) <$> Prelude.mapA fetch holdingCids
+        assertMsg "Payment needs some holding." $ not $ Prelude.null holdingCids
+        assertMsg "Quantity has to be less or equal than price." $
+          price <= sum ((.amount) <$> holdingVs)
+
+        let holdingCidsWithData = zip holdingCids holdingVs
+            f viewer (_, hv) = do
+              earmark <- Cbdc.getEarmark hv.instrument viewer
+              pure $ earmark == NoSector
+        (normalCbdc, everyEarmarkedCbdc) <- partitionA (f customer) holdingCidsWithData
+
+        (earmarkedSpent, earmarkedResult, notificationOpt) <- case certificateKeyOpt of
+          None -> pure (0.0, None, None)
+          Some certKey -> do
+            lookupByKey @Certificate.R certKey >>= \case
+              None -> do
+                pure (0.0, None, Some "certificate is no longer valid")
+              Some refCid -> do
+                certKey' <- (.certificateKey) . (.certificateView) <$> fetch refCid
+                to3 . (, None) <$> payWithEarmarkedAsMuchAsPossible
+                   customerAccount providerAccount price certKey' customer everyEarmarkedCbdc
+
+        normalResult <-
+          if earmarkedSpent < price
+          then do
+            let (normalCbdcCids, _) = unzip normalCbdc
+            resultCbdc <- Account.exerciseInterfaceByKey @HasFlexibleTransfer.I customerAccount
+              customerAccount.owner
+              HasFlexibleTransfer.Transfer with
+                receiverAccount = providerAccount
+                amount = Some (price - earmarkedSpent)
+                holdingCids = normalCbdcCids
+                isEarmarked = False
+                ..
+
+            pure $ Some resultCbdc
+          else
+            pure None
+        paid <- create LastPaidInvoice with invoiceV = view (toInterface @Invoice.I this)
+
+        let discloseContext = "invoice-for-" <> show customerAccount.owner
+        Account.undisclose (discloseContext, Set.singleton customerAccount.owner)
+          providerAccount.owner (Set.singleton providerAccount.owner) providerAccount
+
+        pure (paid, optionalToList normalResult <> optionalToList earmarkedResult, notificationOpt)
+
+to3 : ((a,b),c) -> (a,b,c)
+to3 ((a,b),c) = (a,b,c)

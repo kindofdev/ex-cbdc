@@ -1,0 +1,17 @@
+module Testing.Models.Entities where
+
+import Daml.Finance.Interface.Types.Common.Types (PartiesMap)
+
+data EntitiesForTesting a = EntitiesForTesting
+  with
+    usFRB : a
+    ecb : a
+    bankA : a
+    bankB : a
+    operator : a
+    provider : a
+    distributor : a
+    customer : a
+    public : Party
+    pub : PartiesMap
+  deriving Functor

@@ -1,0 +1,25 @@
+module Testing.Utils.Distributor where
+
+import Daml.Script
+
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), PartiesMap)
+
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Finance.Account.Certifiable  qualified as AccountC
+
+import Cbdc.Distributor.Role qualified as Distributor
+import Cbdc.Provider.Role qualified as Provider
+
+createProviderRole
+  : Party -> Party -> Party -> Party -> PartiesMap -> AccountKey
+ -> Script (ContractId Provider.Role, CertificateKey, ContractId AccountC.I)
+createProviderRole centralBank distributor provider public pub providerAtCbAccount = do
+  inviteCid <- submit distributor $ exerciseByKeyCmd @Distributor.Role (centralBank, distributor)
+    Distributor.InviteProvider with ..
+  submitMulti [provider] [public] $
+    exerciseCmd inviteCid Distributor.ProviderRoleInvite_Accept with ..
+
+terminateProviderRole : Party -> Party -> Script ()
+terminateProviderRole distributor provider =
+  submit distributor $ exerciseByKeyCmd @Provider.Role (distributor, provider)
+    Provider.ProviderRole_Terminate

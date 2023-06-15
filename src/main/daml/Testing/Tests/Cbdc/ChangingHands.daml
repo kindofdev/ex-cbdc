@@ -1,0 +1,37 @@
+module Testing.Tests.Cbdc.ChangingHands where
+
+import Daml.Script
+
+import Interface.Certificate.Types (Sector(..))
+
+import Testing.Models.Entities
+import Testing.Tests.Cbdc.Util
+import Testing.Utils.Account
+import Testing.Utils.CentralBank
+import Testing.Utils.Holding
+import Testing.Utils.TestUtilities
+
+earmarkedCbdcCannotBeTransferred : Script ()
+earmarkedCbdcCannotBeTransferred = do
+  let earmarkedHoldingQuantity = 100.0
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+
+  -- Inject earmarked holding
+  holdingCid <- issueSpecialCbdc usFRB operator public customerAtCbAccount Housing
+    earmarkedHoldingQuantity cbInstrumentMap
+
+  transferRegularFails customerAtCbAccount providerAtCbAccount None public holdingCid
+
+regularCbdcCanBeTransferred : Script ()
+regularCbdcCanBeTransferred = do
+  let regularHoldingQuantity = 100.0
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+
+  -- Inject earmarked holding
+  holdingCid <- issueCbdc usFRB operator (Some customerAtCbAccount)
+    regularHoldingQuantity cbInstrumentMap
+
+  holdingCid' <- transferRegular customerAtCbAccount providerAtCbAccount None public holdingCid
+
+  assertICidNonExistence customer holdingCid
+  assertHolding holdingCid' NoSector regularHoldingQuantity providerAtCbAccount public

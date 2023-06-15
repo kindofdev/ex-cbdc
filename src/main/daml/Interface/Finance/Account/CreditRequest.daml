@@ -1,0 +1,52 @@
+module Interface.Finance.Account.CreditRequest where
+
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), InstrumentQuantity)
+
+-- | Type synonym for `CreditRequest`.
+type I = CreditRequest
+
+-- | Type synonym for `View`.
+type V = View
+
+-- | View for `CreditRequest`.
+data View = View
+  with
+    account : AccountKey
+    quantity : InstrumentQuantity
+  deriving (Eq, Show)
+
+interface CreditRequest where
+  viewtype V
+
+  accept : Update (ContractId Fungible.I)
+  reject : Reject -> Update (ContractId CreditRejection)
+
+  nonconsuming choice GetView : View
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+        -- ^ The party fetching the view.
+    controller viewer
+    do
+      pure $ view this
+
+  nonconsuming choice Accept : ContractId Fungible.I
+    controller (view this).account.custodian
+    do
+      accept this
+
+  nonconsuming choice Reject : ContractId CreditRejection
+    with
+      reason : Text
+    controller (view this).account.custodian
+    do
+      reject this arg
+
+template CreditRejection
+  with
+    account : AccountKey
+    quantity : InstrumentQuantity
+    reason : Text
+  where
+    signatory account.custodian, account.owner

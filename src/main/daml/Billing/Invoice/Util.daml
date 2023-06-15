@@ -1,0 +1,61 @@
+module Billing.Invoice.Util where
+
+import DA.Action (filterA)
+import DA.Foldable (forA_)
+import DA.Set as Set
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Finance.Account.HasFlexibleTransfer qualified as HasFlexibleTransfer
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+payWithEarmarkedAsMuchAsPossible
+     : AccountKey
+    -> AccountKey
+    -> Decimal
+    -> CertificateKey
+    -> Party
+    -> [(ContractId Fungible.I, BaseHolding.View)]
+    -> Update (Decimal, Optional (ContractId Fungible.I))
+payWithEarmarkedAsMuchAsPossible
+  senderAccount receiverAccount price certKey viewer everyEarmarkedCbdc
+  = do
+  earmarkedCbdc <-
+        filterA (\(_, hv) -> do
+          earmark <- Cbdc.getEarmark hv.instrument viewer
+          pure (certKey.sector == earmark)
+        ) everyEarmarkedCbdc
+  case earmarkedCbdc of
+    [] -> pure (0.0, None)
+    _ -> pay certKey earmarkedCbdc
+ where
+  pay certKey earmarkedCbdc = do
+    forA_ earmarkedCbdc \(holdingCid, holdingV) ->
+      assertMsg "holding has to be signed by Certificate provider." $
+        certKey.provider == holdingV.account.custodian
+    let earmarkedSumQuantity = sum $ map (\(_, hv) -> hv.amount) earmarkedCbdc
+        earmarkedNeededQuantity = min price earmarkedSumQuantity
+
+    resultCbdc <- Account.exerciseInterfaceByKey @HasFlexibleTransfer.I senderAccount
+      senderAccount.owner
+      HasFlexibleTransfer.Transfer with
+        amount = Some earmarkedNeededQuantity
+        holdingCids = fst <$> earmarkedCbdc
+        isEarmarked = True
+        ..
+
+    pure (earmarkedNeededQuantity, Some resultCbdc)
+
+partitionA : (CanAbort m, Action m, Ord a) => (a -> m Bool) -> [a] -> m ([a], [a])
+partitionA predA xs = do
+  xs' <- filterA (\x -> predA x) xs
+  let xs'' = (Set.fromList xs) `Set.difference` (Set.fromList xs')
+  pure (xs', Set.toList xs'')
+
+
+instance Ord BaseHolding.View where
+  compare x y = compare x.instrument y.instrument

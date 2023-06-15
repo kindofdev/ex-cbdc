@@ -1,0 +1,93 @@
+module Interface.Finance.Account.HasHoldingRequest where
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), InstrumentQuantity)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Finance.Account.DebitRequest (DebitRejection)
+import Interface.Finance.Account.DebitRequest qualified as DebitRequest
+import Interface.Finance.Account.CreditRequest (CreditRejection)
+import Interface.Finance.Account.CreditRequest qualified as CreditRequest
+
+-- | Type synonym for `HasHoldingRequest`.
+type I = HasHoldingRequest
+
+-- | Type synonym for `View`.
+type V = View
+
+-- | View for `HasHoldingRequest`.
+data View = View
+  with
+    account : AccountKey
+    supportCreditRequest : Bool
+    supportDebitRequest : Bool
+  deriving (Eq, Show)
+
+-- | Interface for an account which can be used to request
+-- credit and debit from the owner to the custodian.
+interface HasHoldingRequest requires Account.I, Disclosure.I where
+  viewtype V
+
+  requestCredit : RequestCredit -> Update (ContractId CreditRequest.I)
+  acceptCredit : AcceptCredit -> Update (ContractId Fungible.I)
+  rejectCredit : RejectCredit -> Update (ContractId CreditRejection)
+
+  requestDebit : RequestDebit -> Update (ContractId DebitRequest.I)
+  acceptDebit : AcceptDebit -> Update ()
+  rejectDebit : RejectDebit -> Update (ContractId DebitRejection)
+
+  nonconsuming choice GetView : View
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+        -- ^ The party fetching the view.
+    controller viewer
+    do
+      pure $ view this
+
+  nonconsuming choice RequestCredit : ContractId CreditRequest.I
+    with
+      quantity : InstrumentQuantity
+    controller (view this).account.owner
+    do
+      requestCredit this arg
+
+  nonconsuming choice AcceptCredit : ContractId Fungible.I
+    with
+      requestCid : ContractId CreditRequest.I
+    controller (view this).account.custodian
+    do
+      acceptCredit this arg
+
+  nonconsuming choice RejectCredit : ContractId CreditRejection
+    with
+      reason : Text
+      requestCid : ContractId CreditRequest.I
+    controller (view this).account.custodian
+    do
+      rejectCredit this arg
+
+  nonconsuming choice RequestDebit : ContractId DebitRequest.I
+    with
+      holdingCid : ContractId BaseHolding.I
+    controller (view this).account.owner
+    do
+      requestDebit this arg
+
+  nonconsuming choice AcceptDebit : ()
+    with
+      requestCid : ContractId DebitRequest.I
+    controller (view this).account.custodian
+    do
+      acceptDebit this arg
+
+  nonconsuming choice RejectDebit : ContractId DebitRejection
+    with
+      reason : Text
+      requestCid : ContractId DebitRequest.I
+    controller (view this).account.custodian
+    do
+      rejectDebit this arg
+

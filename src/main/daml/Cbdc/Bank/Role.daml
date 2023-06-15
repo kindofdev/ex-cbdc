@@ -1,0 +1,54 @@
+module Cbdc.Bank.Role where
+
+import DA.Assert
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), InstrumentQuantity, PartiesMap)
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+
+import Interface.Certificate.Types (Sector(..))
+import Interface.Finance.Account.CreditRequest qualified as CreditRequest
+import Interface.Finance.Account.DebitRequest qualified as DebitRequest
+import Interface.Finance.Account.HasHoldingRequest qualified as HasHoldingRequest
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+template Role
+  with
+    bankAtCbAccount : AccountKey
+    observers : PartiesMap
+  where
+    let cb = bankAtCbAccount.custodian
+        bank = bankAtCbAccount.owner
+
+    signatory cb, bank
+    key (cb, bank) : (Party, Party)
+    maintainer key._1
+
+    nonconsuming choice GetRole : Role
+      with
+        viewer : Party
+      controller viewer
+      do
+        pure this
+
+    nonconsuming choice RequestCbdcInjection : ContractId CreditRequest.I
+      with
+        quantity : InstrumentQuantity
+      controller bank
+      do
+        earmark <- Cbdc.getEarmark quantity.unit bank
+        assertMsg "it cannot be requested a credit earmarked cbdc" $ earmark == NoSector
+        Account.exerciseInterfaceByKey @HasHoldingRequest.I bankAtCbAccount
+          bank HasHoldingRequest.RequestCredit with ..
+
+    nonconsuming choice RequestCbdcExtraction : ContractId DebitRequest.I
+      with
+        holdingCid : ContractId BaseHolding.I
+      controller bank
+      do
+        holdingV <- view . toInterface @BaseHolding.I <$> fetch holdingCid
+        holdingV.account.custodian === cb
+        holdingV.account.owner === bank
+
+        Account.exerciseInterfaceByKey @HasHoldingRequest.I bankAtCbAccount
+          bank HasHoldingRequest.RequestDebit with ..

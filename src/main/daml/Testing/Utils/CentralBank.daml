@@ -1,0 +1,133 @@
+module Testing.Utils.CentralBank where
+
+import DA.Optional
+import DA.List (head)
+import DA.List qualified as L
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import Daml.Script
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types
+  (AccountKey(..), InstrumentKey(..), PartiesMap, Quantity(..))
+
+import Interface.Certificate.Types (Sector(..))
+
+import Cbdc.Bank.Role qualified as Bank
+import Cbdc.CentralBank.Role qualified as CentralBank
+import Cbdc.Distributor.Role qualified as Distributor
+import Cbdc.Operator.Role qualified as Operator
+
+import Testing.Utils.Account
+import Testing.Utils.Factory
+
+createCentralBankRole
+  : Party -> Party -> Party -> PartiesMap -> Text
+ -> Script (ContractId CentralBank.Role, ContractId Account.I, [InstrumentKey])
+createCentralBankRole operator cb public pub cbdcLabel = do
+  cbdcFactoryCid <- createCbdcFactory cb pub
+  accountFactoryCid <- createAccountFactory cb pub
+  holdingFactoryCid <- createHoldingFactory cb pub
+
+  invite <- submit operator $ exerciseByKeyCmd @Operator.Role operator
+    Operator.InviteCentralBank with ..
+  submitMulti [cb] [public] $
+    exerciseCmd invite Operator.CentralBankRoleInvite_Accept with
+      cbdcIntrumentsObservers = pub
+      roleObservers = pub
+      ..
+
+issueCbdc
+  : Party ->  Party -> Optional AccountKey -> Decimal -> Map Sector InstrumentKey
+ -> Script (ContractId Fungible.I)
+issueCbdc cb operator targetAccountOpt amount instrumentMap = submit cb $
+  exerciseByKeyCmd @CentralBank.Role (operator, cb) CentralBank.IssueCbdc with
+    quantity = Quantity with
+      unit = fromSome $ Map.lookup NoSector instrumentMap
+      amount
+    ..
+
+issueCbdcFails
+  : Party ->  Party -> Optional AccountKey -> Decimal -> Map Sector InstrumentKey
+ -> Script ()
+issueCbdcFails cb operator targetAccountOpt amount instrumentMap = submitMustFail cb $
+  exerciseByKeyCmd @CentralBank.Role (operator, cb) CentralBank.IssueCbdc with
+    quantity = Quantity with
+      unit = fromSome $ Map.lookup NoSector instrumentMap
+      amount
+    ..
+
+issueSpecialCbdc
+  : Party -> Party -> Party -> AccountKey -> Sector -> Decimal -> Map Sector InstrumentKey
+ -> Script (ContractId Fungible.I)
+issueSpecialCbdc cb operator public targetAccount sector amount instrumentMap = submitMulti [cb] [public] $
+  exerciseByKeyCmd @CentralBank.Role (operator, cb) CentralBank.IssueSpecialCbdc with
+    targetAccount
+    quantity = Quantity with
+      unit = fromSome $ Map.lookup sector instrumentMap
+      ..
+
+issueSpecialCbdcFails
+  : Party -> Party -> AccountKey -> Sector -> Decimal -> Map Sector InstrumentKey
+ -> Script ()
+issueSpecialCbdcFails cb operator targetAccount sector amount instrumentMap = submitMustFail cb $
+  exerciseByKeyCmd @CentralBank.Role (operator, cb) CentralBank.IssueSpecialCbdc with
+    targetAccount
+    quantity = Quantity with
+      unit = fromSome $ Map.lookup sector instrumentMap
+      ..
+
+createUserAtCentralBank : AccountKey -> Party -> Party -> Script (ContractId Account.I)
+createUserAtCentralBank userAtCbAccount operator public = do
+  let cb = userAtCbAccount.custodian
+      user = userAtCbAccount.owner
+  invite <- submit cb $ exerciseByKeyCmd @CentralBank.Role (operator, cb)
+    CentralBank.InviteUser with ..
+  submitMulti [user] [public] $ exerciseCmd invite CentralBank.UserInvite_Accept
+
+createBankAtCentralBank
+  : AccountKey -> Party -> Party -> PartiesMap
+ -> Script (ContractId Bank.Role, ContractId Account.I)
+createBankAtCentralBank bankAtCbAccount operator public pub = do
+  let cb = bankAtCbAccount.custodian
+      bank = bankAtCbAccount.owner
+  invite <- submit cb $ exerciseByKeyCmd @CentralBank.Role (operator, cb)
+    CentralBank.InviteBank with ..
+  submitMulti [bank] [public] $
+    exerciseCmd invite CentralBank.BankRoleInvite_Accept with roleObservers = pub
+
+createDistributorRole
+  : Party -> Party -> Party -> Party -> PartiesMap -> Sector
+ -> Script (ContractId Distributor.Role)
+createDistributorRole cb operator distributor public pub sector = do
+  invoiceFactoryCid <- createInvoiceFactory distributor pub
+  certificateFactoryCid <- createCertificateFactory cb distributor sector
+    (Map.fromList [(show distributor, Set.singleton distributor)])
+
+  inviteCid <- submit cb $ exerciseByKeyCmd @CentralBank.Role (operator, cb)
+    CentralBank.InviteDistributor with distributor = distributor; ..
+  submitMulti [distributor] [public] $
+    exerciseCmd inviteCid CentralBank.DistributorRoleInvite_Accept with
+      roleObservers = pub
+      ..
+
+transferFromCentralbankToBank
+  : Party -> Party -> Party -> Party -> Decimal
+ -> Script (ContractId Fungible.I)
+transferFromCentralbankToBank operator cb bank public amount = do
+  cbRole <- snd . fromSome  <$> queryContractKey @CentralBank.Role cb (operator, cb)
+  bankRole <- snd . fromSome  <$> queryContractKey @Bank.Role cb (cb, bank)
+  cbdcHoldingCid <- firstContractId . L.filter (\(_, Some v) -> v.account.owner == cb) <$>
+    queryInterface @BaseHolding.I cb
+
+  transferRegular cbRole.cbAtCbAccount bankRole.bankAtCbAccount (Some amount) public
+    (coerceInterfaceContractId cbdcHoldingCid)
+  cbdcHoldingCid' <- firstContractId . L.filter (\(_, Some v) -> v.account.owner == cb) <$>
+    queryInterface @BaseHolding.I cb
+  pure . coerceInterfaceContractId $ cbdcHoldingCid'
+
+firstContractId : [(c, b)] -> c
+firstContractId = fst . head

@@ -1,0 +1,6 @@
+module Testing.Models.Users where
+
+import Daml.Script
+import Testing.Models.Entities
+
+type UsersForTesting = EntitiesForTesting User

@@ -1,0 +1,42 @@
+module Interface.Finance.Instrument.Cbdc.Instrument where
+
+import Daml.Finance.Interface.Instrument.Base.Instrument qualified as BaseInstrument
+import Daml.Finance.Interface.Types.Common.Types (Id(..), InstrumentKey)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Certificate.Types (Sector(..))
+
+-- | Type synonym for `Instrument`.
+type I = Instrument
+
+-- | Type synonym for `View`.
+type V = View
+
+-- | View of `Instrument`.
+data View = View
+  with
+    earmark : Sector
+  deriving (Eq, Ord, Show)
+
+-- | Interface for cbdc instruments which do not define any lifecycling logic.
+interface Instrument requires BaseInstrument.I, Disclosure.I where
+  viewtype V
+
+  nonconsuming choice GetView : V
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+        -- ^ The party retrieving the view.
+    controller viewer
+    do
+      pure $ view this
+
+
+getId : Sector -> Id
+getId = Id . ("cbdc-" <> ) . show
+
+getEarmark : InstrumentKey -> Party -> Update Sector
+getEarmark instrumentKey viewer = do
+  cbdcV <- BaseInstrument.exerciseInterfaceByKey @I instrumentKey
+    viewer GetView with viewer
+  pure cbdcV.earmark

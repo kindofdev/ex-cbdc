@@ -1,0 +1,8 @@
+.daml
+.lib
+*.log
+target
+.DS_Store
+daml.js
+.vscode
+parties.json

@@ -1,0 +1,13 @@
+module Interface.Certificate.Types where
+
+data Sector = NoSector
+            | Housing
+            | Food
+            | University
+  deriving (Bounded, Enum, Eq, Ord)
+
+instance Show Sector where
+  show NoSector = "unmarked"
+  show Housing = "housing"
+  show Food = "food"
+  show University = "university"

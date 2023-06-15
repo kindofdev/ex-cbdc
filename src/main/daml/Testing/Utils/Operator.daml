@@ -1,0 +1,9 @@
+module Testing.Utils.Operator where
+
+import Daml.Script
+
+import Cbdc.Operator.Role qualified as Operator
+
+createOperator : Party -> Script (ContractId Operator.Role)
+createOperator operator =
+  submit operator $ createCmd Operator.Role with ..

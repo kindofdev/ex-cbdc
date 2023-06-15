@@ -1,0 +1,25 @@
+module Finance.Account.DebitRequest where
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+import Interface.Finance.Account.DebitRequest (DebitRejection(..))
+import Interface.Finance.Account.DebitRequest qualified as DebitRequest
+
+template DebitRequest
+  with
+    account : AccountKey
+    holdingCid : ContractId BaseHolding.I
+  where
+    signatory account.owner
+    observer account.custodian
+
+    interface instance DebitRequest.I for DebitRequest where
+      view = DebitRequest.View with ..
+      accept =
+        Account.exerciseInterfaceByKey @Account.I account (account.custodian)
+          Account.Debit with ..
+      reject DebitRequest.Reject {reason} = do
+        holdingV <- view <$> fetch holdingCid
+        create DebitRejection with ..

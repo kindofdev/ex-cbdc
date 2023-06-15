@@ -1,0 +1,190 @@
+module Testing.Tests.Cbdc.CreditingAndDebiting where
+
+import DA.Assert
+import Daml.Script
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Optional
+
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Types.Common.Types (InstrumentKey(..), Quantity(..))
+
+import Interface.Certificate.Types (Sector(..))
+
+import Testing.Models.Entities
+import Testing.Tests.Cbdc.Util
+import Testing.Utils.Account
+import Testing.Utils.Bank
+import Testing.Utils.CentralBank
+import Testing.Utils.Holding
+import Testing.Utils.TestUtilities
+
+earmarkedCbdcCannotBeDebited : Script ()
+earmarkedCbdcCannotBeDebited = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let earmarkedHoldingQuantity = 500.0
+  holdingCid <- issueSpecialCbdc usFRB operator public customerAtCbAccount Housing
+    earmarkedHoldingQuantity cbInstrumentMap
+
+  debitFails customerAtCbAccount (toInterfaceContractId holdingCid)
+
+regularCbdcCanBeDebited : Script ()
+regularCbdcCanBeDebited = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let earmarkedHoldingQuantity = 500.0
+  holdingCid <- issueCbdc usFRB operator (Some customerAtCbAccount)
+    earmarkedHoldingQuantity cbInstrumentMap
+
+  debit customerAtCbAccount (toInterfaceContractId holdingCid)
+  assertICidNonExistence customer holdingCid
+
+userCanRequestDebitToCb : Script ()
+userCanRequestDebitToCb = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 500.0
+  holdingCid <- issueCbdc usFRB operator (Some customerAtCbAccount)
+    regularHoldingQuantity cbInstrumentMap
+
+  -- Reject
+  let reason = "Account blocked"
+  debitRejectionCid <- requestDebit customerAtCbAccount (toInterfaceContractId holdingCid) >>=
+    rejectDebitRequest customerAtCbAccount reason
+  queryContractId customerAtCbAccount.owner debitRejectionCid >>= \(Some debitRejection) ->
+    debitRejection.reason === reason
+  assertICidExistence customerAtCbAccount.owner holdingCid
+
+  -- Accept
+  requestDebit customerAtCbAccount (toInterfaceContractId holdingCid) >>=
+    acceptDebitRequest customerAtCbAccount
+  assertICidNonExistence customer holdingCid
+
+userCannotRequestCreditToCb : Script ()
+userCannotRequestCreditToCb = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap NoSector
+        amount = regularHoldingQuantity
+
+  requestCreditFails customerAtCbAccount public quantity
+
+bankCanRequestRegularCdbcInjection : Script ()
+bankCanRequestRegularCdbcInjection = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap NoSector
+        amount = regularHoldingQuantity
+
+  -- Reject
+  let reason = "Account blocked"
+  creditRejectionCid <- requestCbdcInjection bankAAtCbAccount operator public quantity >>=
+    rejectCreditRequest bankAAtCbAccount reason
+  queryContractId bankAAtCbAccount.owner creditRejectionCid >>= \(Some creditRejection) ->
+    creditRejection.reason === reason
+
+  -- Accept
+  holdingCid <- requestCbdcInjection bankAAtCbAccount operator public quantity >>=
+    acceptCreditRequest bankAAtCbAccount
+  assertHolding holdingCid NoSector regularHoldingQuantity bankAAtCbAccount public
+
+bankCannotRequestEarmarkedCdbcInjection : Script ()
+bankCannotRequestEarmarkedCdbcInjection = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let earmarkedHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap Housing
+        amount = earmarkedHoldingQuantity
+
+  requestCbdcInjectionFails bankAAtCbAccount operator public quantity
+
+bankCanRequestRegularCdbcExtraction : Script ()
+bankCanRequestRegularCdbcExtraction = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap NoSector
+        amount = regularHoldingQuantity
+  -- First we need to credit the account to have a holding to extract
+  holdingCid <- requestCbdcInjection bankAAtCbAccount operator public quantity >>=
+    acceptCreditRequest bankAAtCbAccount
+
+  -- Reject
+  let reason = "Account blocked"
+  debitRejectionCid <- requestCbdcExtraction bankAAtCbAccount operator public
+    (toInterfaceContractId @BaseHolding.I holdingCid) >>=
+      rejectDebitRequest bankAAtCbAccount reason
+  queryContractId bankAAtCbAccount.owner debitRejectionCid >>= \(Some debitRejection) ->
+    debitRejection.reason === reason
+  assertICidExistence bankA holdingCid
+
+  -- Accept
+  requestCbdcExtraction bankAAtCbAccount operator public
+    (toInterfaceContractId @BaseHolding.I holdingCid) >>= acceptDebitRequest bankAAtCbAccount
+  assertICidNonExistence customer holdingCid
+
+cbCanIssueEarmarkedCbdcToAnUser : Script ()
+cbCanIssueEarmarkedCbdcToAnUser = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let earmarkedHoldingQuantity = 100.0
+      earmark = Housing
+  holdingCid <- issueSpecialCbdc usFRB operator public customerAtCbAccount earmark
+    earmarkedHoldingQuantity cbInstrumentMap
+
+  assertHolding holdingCid earmark earmarkedHoldingQuantity customerAtCbAccount public
+
+cbCanIssueRegularCbdcToAnUser : Script ()
+cbCanIssueRegularCbdcToAnUser = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 100.0
+      earmark = NoSector
+  holdingCid <- issueCbdc usFRB operator (Some customerAtCbAccount)
+    regularHoldingQuantity cbInstrumentMap
+
+  assertHolding holdingCid earmark regularHoldingQuantity customerAtCbAccount public
+
+cbCanIssueRegularCbdcToItself : Script ()
+cbCanIssueRegularCbdcToItself = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 100.0
+      earmark = NoSector
+  holdingCid <- issueCbdc usFRB operator None regularHoldingQuantity cbInstrumentMap
+
+  assertHolding holdingCid earmark regularHoldingQuantity cbAtCbAccount public
+
+cbCannotIssueEarmarkedCbdcToItself : Script ()
+cbCannotIssueEarmarkedCbdcToItself = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let earmarkedHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap Housing
+        amount = earmarkedHoldingQuantity
+
+  issueSpecialCbdcFails usFRB operator cbAtCbAccount Housing
+    earmarkedHoldingQuantity cbInstrumentMap
+
+cbCannotIssueEarmarkedCbdcToABank : Script ()
+cbCannotIssueEarmarkedCbdcToABank = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let earmarkedHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap Housing
+        amount = earmarkedHoldingQuantity
+
+  issueSpecialCbdcFails usFRB operator bankAAtCbAccount Housing
+    earmarkedHoldingQuantity cbInstrumentMap
+
+cbCannotIssueRegularCbdcToABank : Script ()
+cbCannotIssueRegularCbdcToABank = do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let regularHoldingQuantity = 500.0
+      quantity = Quantity with
+        unit = getInstrumentKey cbInstrumentMap NoSector
+        amount = regularHoldingQuantity
+
+  issueCbdcFails usFRB operator (Some bankAAtCbAccount)
+    regularHoldingQuantity cbInstrumentMap
+
+
+getInstrumentKey : Map Sector InstrumentKey -> Sector -> InstrumentKey
+getInstrumentKey cbInstrumentMap sector = fromSome $ Map.lookup sector cbInstrumentMap

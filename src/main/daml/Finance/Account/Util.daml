@@ -1,0 +1,126 @@
+module Finance.Account.Util where
+
+import DA.List.Total as TotalList
+import DA.Optional
+import DA.Set as Set hiding (null)
+import DA.Traversable qualified as Traversable
+
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Holding.Transferable qualified as Transferable
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+checkAndTransferDeposits
+  : AccountKey
+  -> [ContractId Fungible.I]
+  -> Optional Decimal
+  -> AccountKey
+  -> Text
+  -> Party
+  -> Update (ContractId Fungible.I)
+checkAndTransferDeposits senderAccount holdingCids amount receiverAccount nameOfAssets viewer = do
+    holdingVs <- fmap (view . toInterface @BaseHolding.I) <$> mapA fetch holdingCids
+    let sumQuantity = sum $ map (.amount) holdingVs
+        transferAmount = fromOptional sumQuantity amount
+    checkHoldings holdingVs transferAmount sumQuantity nameOfAssets viewer
+    transferHoldings senderAccount holdingCids holdingVs transferAmount receiverAccount nameOfAssets
+
+checkHoldings
+  : [BaseHolding.View] -> Decimal -> Decimal -> Text -> Party -> Update ()
+checkHoldings holdingsView transferAmount sumQuantity nameOfAssets viewer = do
+  assertMsg "All holdings to be transfered have to be the same." $
+    allTheSame (.instrument) holdingsView
+  assertMsg "The targeted transfer amount must be less or equal to the total provided holding quantity." $
+    transferAmount <= sumQuantity
+
+transferHoldings
+  : AccountKey
+  -> [ContractId Fungible.I]
+  -> [BaseHolding.View]
+  -> Decimal
+  -> AccountKey
+  -> Text
+  -> Update (ContractId Fungible.I)
+transferHoldings senderAccount holdingCids holdings transferAmount
+  receiverAccount nameOfAssets
+  = do
+    newHoldingCid <- splitMergeNewHoldingFromHoldingForQuantity holdingCids holdings
+      transferAmount (nameOfAssets <> " transfer")
+    coerceInterfaceContractId <$>
+      exercise (toInterfaceContractId @Transferable.I newHoldingCid) Transferable.Transfer with
+        actors = Set.fromList [senderAccount.custodian, senderAccount.owner]
+        newOwnerAccount = receiverAccount
+
+splitMergeNewHoldingFromHoldingForQuantity
+  : [ContractId Fungible.I] -> [BaseHolding.View] -> Decimal -> Text
+ -> Update (ContractId Fungible.I)
+splitMergeNewHoldingFromHoldingForQuantity holdingCids holdingViews neededQuantity uniqueErrorMsg =
+  case takeNeededHoldingsForQuantity neededQuantity holdingCids holdingViews of
+    Sum neededDepositSum -> do
+      splitMergeNewHoldingFromNeededHoldingSum neededDepositSum
+    NotEnough ->
+      error $ "Not enough Holdings: more needed for quantity "
+                  <> show neededQuantity
+                  <> " (" <> uniqueErrorMsg <> ")."
+
+takeNeededHoldingsForQuantity
+  : Decimal -> [ContractId Fungible.I] -> [BaseHolding.View]
+ -> NeededDeposits
+takeNeededHoldingsForQuantity neededQuantity holdingCids holdingViews =
+    if resultDepositSum.total < neededQuantity then NotEnough else Sum resultDepositSum
+  where
+    availableDepositsWithCids = zip holdingCids holdingViews
+    initialEmptyDepositSum = NeededHoldingSum 0.0 [] None
+    resultDepositSum = foldl addNextDepositToSumIfNeeded initialEmptyDepositSum availableDepositsWithCids
+    addNextDepositToSumIfNeeded result@(NeededHoldingSum currentTotal sumDeposits _) (cid, holdingView) =
+      if currentTotal < neededQuantity
+      then
+        if neededQuantity < currentTotal + holdingView.amount
+        then let requiredAmount = neededQuantity - currentTotal in
+              NeededHoldingSum
+              (currentTotal + holdingView.amount)
+              sumDeposits
+              (Some (requiredAmount, cid))
+        else NeededHoldingSum
+              (currentTotal + holdingView.amount)
+              (cid :: sumDeposits)
+              None
+      else result
+
+splitMergeNewHoldingFromNeededHoldingSum: NeededHoldingSum -> Update (ContractId Fungible.I)
+splitMergeNewHoldingFromNeededHoldingSum NeededHoldingSum{..} = do
+  maybeHoldingWithNeededAmount <-
+    Traversable.forA someOfItNeeded \(neededAmount, someOfItNeededCid) ->
+      exercise someOfItNeededCid Fungible.Split with amounts = [neededAmount]
+  case (optionalToList maybeHoldingWithNeededAmount >>= splitResultToList) ++ fullDepositsNeeded of
+    firstDepositCid :: restOfHoldings -> do
+      if (not . null $ restOfHoldings)
+        then exercise firstDepositCid Fungible.Merge with fungibleCids = restOfHoldings
+        else pure firstDepositCid
+    [] ->
+      error "No holding remained after calculating the needed amount."
+
+splitResultToList : Fungible.SplitResult -> [ContractId Fungible.I]
+splitResultToList (Fungible.SplitResult splitCids rest) = splitCids
+
+data NeededDeposits = NotEnough | Sum NeededHoldingSum deriving (Eq)
+
+isEnough : NeededDeposits -> Bool
+isEnough = (/=) NotEnough
+
+getSum : NeededDeposits -> NeededHoldingSum
+getSum (Sum r) = r
+getSum NotEnough = error "Result is not a sum: Not enough."
+
+data NeededHoldingSum = NeededHoldingSum
+  with
+    total : Decimal
+    fullDepositsNeeded : [ContractId Fungible.I]
+    someOfItNeeded : Optional (Decimal, ContractId Fungible.I)
+  deriving (Eq, Show)
+
+allTheSame : Eq b => (a -> b) -> [a] -> Bool
+allTheSame selector items =
+    all (\item -> Some (selector item) == firstElem) items
+  where
+    firstElem = selector <$> TotalList.head items

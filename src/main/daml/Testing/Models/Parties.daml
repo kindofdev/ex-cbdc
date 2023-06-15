@@ -1,0 +1,6 @@
+module Testing.Models.Parties where
+
+import Testing.Models.Entities
+
+type PartiesForTesting = EntitiesForTesting Party
+

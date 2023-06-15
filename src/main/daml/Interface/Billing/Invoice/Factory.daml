@@ -1,0 +1,62 @@
+module Interface.Billing.Invoice.Factory where
+
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..), Parties, PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Billing.Invoice.Invoice qualified as Invoice
+import Interface.Certificate.Certificate (CertificateKey)
+
+-- | Type synonym for `Factory`.
+type F = Factory
+
+-- | Type synonym for `View`.
+type V = View
+
+-- View of `Factory`.
+data View = View
+  with
+    provider : Party
+      -- ^ The provider of the `Factory`.
+  deriving (Eq, Show)
+
+-- | Interface that allows implementing templates to create invoices.
+interface Factory requires Disclosure.I where
+  viewtype V
+
+  create' : Create -> Update (ContractId Invoice.I)
+    -- ^ Implementation of `Create` choice.
+  remove : Remove -> Update ()
+    -- ^ Implementation of `Remove` choice.
+
+  nonconsuming choice Create : ContractId Invoice.I
+    -- ^ Create a new invoice.
+    with
+      customer : Party
+      providerAccount : AccountKey
+      certificateKeyOpt : Optional CertificateKey
+      date : Date
+      price : Decimal
+      observers : PartiesMap
+    controller providerAccount.owner
+    do
+      create' this arg
+
+  nonconsuming choice Remove : ()
+    -- ^ Archive an invoice.
+    with
+      invoiceCid : ContractId Invoice.I
+      providerAccount : AccountKey
+    controller providerAccount.owner
+      do
+        remove this arg
+
+
+-- | Disclose factory.
+disclose : (Text, Parties) -> Parties -> ContractId Factory -> Update (ContractId Factory)
+disclose observersToAdd disclosers factoryCid = coerceInterfaceContractId <$>
+  exercise (toInterfaceContractId @Disclosure.I factoryCid) Disclosure.AddObservers with ..
+
+-- | Undisclose factory.
+undisclose : (Text, Parties) -> Parties -> ContractId Factory -> Update (Optional (ContractId Factory))
+undisclose observersToRemove disclosers factoryCid = fmap coerceInterfaceContractId <$>
+  exercise (toInterfaceContractId @Disclosure.I factoryCid) Disclosure.RemoveObservers with ..

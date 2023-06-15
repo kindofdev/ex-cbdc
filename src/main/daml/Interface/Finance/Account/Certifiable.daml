@@ -1,0 +1,51 @@
+module Interface.Finance.Account.Certifiable  where
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Certificate.Certificate (CertificateKey)
+
+-- | Type synonym for `Certifiable`.
+type I = Certifiable
+
+-- | Type synonym for `View`.
+type V = View
+
+-- | View for `Certifiable`.
+data View = View
+  with
+    certificateKeyOpt : Optional CertificateKey
+      -- ^ An optional certificate.
+  deriving (Eq, Show)
+
+-- | Interface for a certified account.
+interface Certifiable requires Account.I, Disclosure.I where
+  viewtype V
+
+  asAccount : Account.I
+  addCertificate : AddCertificate -> Update (ContractId Certifiable)
+  removeCertificate : RemoveCertificate -> Update (ContractId Certifiable)
+
+  nonconsuming choice GetView : View
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+        -- ^ The party fetching the view.
+    controller viewer
+    do
+      pure $ view this
+
+  choice AddCertificate : ContractId Certifiable
+    -- ^ Add a certificate.
+    with certificateKey : CertificateKey
+    controller (view $ asAccount this).custodian, (view $ asAccount this).owner
+    do
+      addCertificate this arg
+
+  choice RemoveCertificate : ContractId Certifiable
+    -- ^ Remove a certificate.
+    with certificateKey : CertificateKey
+    controller (view $ asAccount this).custodian, (view $ asAccount this).owner
+    do
+      removeCertificate this arg
+

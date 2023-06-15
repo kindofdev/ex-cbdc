@@ -1,0 +1,25 @@
+module Testing.Utils.Holding where
+
+import DA.Assert
+import DA.Optional
+import Daml.Script
+
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+
+import Interface.Certificate.Types (Sector(..))
+
+import Testing.Utils.Instrument
+
+getHoldingView : Party -> ContractId Fungible.I -> Script BaseHolding.View
+getHoldingView viewer cid = fromSome <$>
+  queryInterfaceContractId viewer (toInterfaceContractId @BaseHolding.I cid)
+
+assertHolding : ContractId Fungible.I -> Sector -> Decimal -> AccountKey -> Party -> Script ()
+assertHolding holdingCid sector amount' account public = do
+  let owner = account.owner
+  BaseHolding.View {instrument, amount, account} <- getHoldingView owner holdingCid
+  getCbdcView owner public instrument >>= \cbdcV -> cbdcV.earmark === sector
+  amount === amount'
+  account === account

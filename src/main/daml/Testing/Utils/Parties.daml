@@ -1,0 +1,30 @@
+module Testing.Utils.Parties where
+
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import Daml.Script
+
+import Testing.Models.Entities
+import Testing.Models.Parties
+
+setupParties : Script PartiesForTesting
+setupParties = do
+  usFRB <- allocate "USFRB" "usfrb"
+  ecb <- allocate "ECB" "ecb"
+  bankA <- allocate "BankA" "bankA"
+  bankB <- allocate "BankB" "bankB"
+  operator <- allocate "Operator" "operator"
+  provider <- allocate "Provider" "provider"
+  distributor <- allocate "Distributor" "distributor"
+  customer <- allocate "Customer" "customer"
+  public <- allocate "Public" "public"
+
+  let pub = Map.fromList [("publicParty", Set.singleton public)]
+  pure EntitiesForTesting with ..
+  where
+    allocate name participant =
+      allocatePartyWithHintOn
+        name
+        (PartyIdHint with partyIdHint = name)
+        (ParticipantName participant)
+

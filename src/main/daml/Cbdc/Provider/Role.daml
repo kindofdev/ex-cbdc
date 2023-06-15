@@ -1,0 +1,84 @@
+module Cbdc.Provider.Role where
+
+import DA.Foldable (forA_)
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Types.Common.Types (AccountKey(..))
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Billing.Invoice.Factory qualified as Invoice
+import Interface.Billing.Invoice.Invoice (LastPaidInvoice(..), LastPaidInvoice_Archive(..))
+import Interface.Billing.Invoice.Invoice qualified as Invoice
+import Interface.Certificate.Certificate (CertificateKey)
+import Interface.Certificate.Certificate qualified as Certificate
+import Interface.Certificate.Types (Sector(..))
+
+template Role
+  with
+    distributor : Party
+    providerAtCbAccount : AccountKey
+    sector : Sector
+    certificateKey : CertificateKey
+    invoiceFactoryCid : ContractId Invoice.F
+  where
+    let cb = providerAtCbAccount.custodian
+        provider = providerAtCbAccount.owner
+
+    signatory distributor, provider
+    key (distributor, provider) : (Party, Party)
+    maintainer key._1
+
+    ensure providerAtCbAccount.custodian == cb
+        && certificateKey.provider == cb
+        && certificateKey.distributor == distributor
+        && certificateKey.owner == provider
+        && certificateKey.sector == sector
+
+    choice ProviderRole_Terminate : ()
+      controller distributor
+      do
+        Certificate.exerciseInterfaceByKey @Certificate.I certificateKey distributor
+          Certificate.Revoke
+
+    nonconsuming choice CreateInvoice
+      : (ContractId Invoice.I, ContractId Account.I, ContractId Certificate.I)
+      with
+        customer : Party
+        date : Date
+        price : Decimal
+      controller provider
+      do
+        ref <- snd <$> fetchByKey @Certificate.R certificateKey
+        let certificateV = ref.certificateView
+            certificateKey = certificateV.certificateKey
+            certificateCid = ref.cid
+
+        -- Sanity checks
+        assertMsg "Certificate's distributor does not match distributor" $
+          certificateKey.distributor == distributor
+        assertMsg "Certificate's owner does not match provider" $
+          certificateKey.owner == provider
+        assertMsg "Invoice can only be created using a certificate for the role sector" $
+          certificateKey.sector == sector
+
+        let discloseContext = "invoice-for-" <> show customer
+        accountDisclosedCid <- Account.disclose (discloseContext, Set.singleton customer)
+          providerAtCbAccount.owner (Set.singleton providerAtCbAccount.owner) providerAtCbAccount
+
+        certificateDisclosedCid <- coerceInterfaceContractId @Certificate.I <$>
+          exercise (toInterfaceContractId @Disclosure.I certificateCid)
+            Disclosure.AddObservers with
+              disclosers = Set.singleton provider
+              observersToAdd = ("customer", Set.singleton customer)
+
+        lastOpt <- lookupByKey @LastPaidInvoice (provider, customer)
+        forA_ lastOpt (`exercise` LastPaidInvoice_Archive)
+        invoiceCid <- exercise invoiceFactoryCid Invoice.Create with
+          certificateKeyOpt = Some certificateKey
+          observers = Map.empty
+          providerAccount = providerAtCbAccount
+          ..
+
+        pure (invoiceCid, accountDisclosedCid, certificateDisclosedCid)

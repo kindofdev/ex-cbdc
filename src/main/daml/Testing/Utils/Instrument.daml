@@ -1,0 +1,15 @@
+module Testing.Utils.Instrument where
+
+import Daml.Script
+
+import Daml.Finance.Interface.Instrument.Base.Instrument qualified as BaseInstrument
+import Daml.Finance.Interface.Types.Common.Types (InstrumentKey(..))
+
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+import Testing.Utils.TestUtilities
+
+getCbdcView : Party -> Party -> InstrumentKey -> Script Cbdc.View
+getCbdcView viewer public instrumentKey =
+  submitExerciseInterfaceByKeyCmdHelper @BaseInstrument.R @Cbdc.I [viewer] [public]
+    instrumentKey (BaseInstrument.GetCid with ..) (Cbdc.GetView with ..)

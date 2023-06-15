@@ -1,0 +1,272 @@
+module Testing.Tests.Cbdc.PayingTheBill where
+
+import DA.Assert
+import DA.Date qualified as Date
+import DA.Tuple (fst3)
+import Daml.Script
+
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+
+import Interface.Billing.Invoice.Invoice (LastPaidInvoice)
+import Interface.Billing.Invoice.Invoice qualified as Invoice
+import Interface.Certificate.Types
+
+import Testing.Models.Entities
+import Testing.Tests.Cbdc.Util
+import Testing.Utils.Billing
+import Testing.Utils.CentralBank
+import Testing.Utils.Distributor
+import Testing.Utils.Holding
+
+rentInvoiceCanBePaidWithExactAmount : Script ()
+rentInvoiceCanBePaidWithExactAmount = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedQuantity = 1000.0
+      invoicePrice = 1000.0
+
+  (invoiceCid, holdingCid) <-
+    invoiceCanBePaidWithSpecialCDBCSetup issuedQuantity invoicePrice onboarding
+  (_, [resultHoldingCid], None) <- payInvoice customerAtCbAccount public invoiceCid [holdingCid]
+
+  -- The result is "just normal" Cbdc
+  assertHolding resultHoldingCid NoSector invoicePrice providerAtCbAccount public
+
+rentInvoiceCanBePaidWthHigherAmount : Script ()
+rentInvoiceCanBePaidWthHigherAmount = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedQuantity = 1500.0
+      invoicePrice = 1000.0
+  (invoiceCid, holdingCid) <-
+    invoiceCanBePaidWithSpecialCDBCSetup issuedQuantity invoicePrice onboarding
+  (_, [resultHoldingCid], None) <- payInvoice customerAtCbAccount public invoiceCid [holdingCid]
+
+  -- The result is "just normal" Cbdc
+  assertHolding resultHoldingCid NoSector invoicePrice providerAtCbAccount public
+
+rentInvoiceCannotBePaidWhenCBDCIsNotEnough : Script ()
+rentInvoiceCannotBePaidWhenCBDCIsNotEnough = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedQuantity = 1000.0
+      invoicePrice = 2000.0
+  (invoiceCid, holdingCid) <-
+    invoiceCanBePaidWithSpecialCDBCSetup issuedQuantity invoicePrice onboarding
+
+  -- Renter is unable to pay the rent invoice
+  payInvoiceFails customerAtCbAccount public invoiceCid [holdingCid]
+
+rentInvoiceCannotBePaidWithEarmarkedIfCertificateWasRevoked : Script ()
+rentInvoiceCannotBePaidWithEarmarkedIfCertificateWasRevoked = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedSpecialQuantity = 900.0
+      issuedRegularQuantity = 600.0
+      invoicePrice = 600.0
+  (invoiceCid, holdingCids) <-
+    invoiceCanBePaidWithMixedCBDCSetup issuedSpecialQuantity issuedRegularQuantity invoicePrice onboarding
+
+  -- Terminate provider role
+  terminateProviderRole distributor provider
+  -- Pay only with non-earmarked
+  (_, [resultHoldingCid], Some "certificate is no longer valid") <-
+    payInvoice customerAtCbAccount public invoiceCid holdingCids
+  assertHolding resultHoldingCid NoSector issuedRegularQuantity providerAtCbAccount public
+
+rentInvoiceCannotBePaidWithEarmarkedIfProviderCerticateDoesNotMatch : Script ()
+rentInvoiceCannotBePaidWithEarmarkedIfProviderCerticateDoesNotMatch = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedQuantity = 1000.0
+      invoicePrice = 1000.0
+      invoiceDate = Date.date 2023 Date.Aug 16
+
+  -- cb issue cbdc for Food purposes
+  holdingCid <-
+    issueSpecialCbdc usFRB operator public customerAtCbAccount Food issuedQuantity cbInstrumentMap
+  -- provider with a Housing certificate creates an Invoice for paying house renting
+  invoiceCid <- fst3 <$>
+    createInvoice distributor provider public customer invoicePrice invoiceDate
+
+  payInvoiceFails customerAtCbAccount public invoiceCid [holdingCid]
+
+rentInvoiceCanBePaidWithMixedCBDCWhenEarmarkedIsNotEnoughOnItsOwn : Script ()
+rentInvoiceCanBePaidWithMixedCBDCWhenEarmarkedIsNotEnoughOnItsOwn = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedSpecialQuantity = 900.0
+      issuedRegularQuantity = 600.0
+      invoicePrice = 1000.0
+      regularAmtExpected = invoicePrice - issuedSpecialQuantity
+  (invoiceCid, holdingCids) <-
+    invoiceCanBePaidWithMixedCBDCSetup issuedSpecialQuantity issuedRegularQuantity invoicePrice onboarding
+
+  (_, [resultHoldingCid, resultHoldingFromEarmarkedCid], None) <-
+    payInvoice customerAtCbAccount public invoiceCid holdingCids
+
+  assertHolding resultHoldingCid NoSector regularAmtExpected providerAtCbAccount public
+  assertHolding resultHoldingFromEarmarkedCid NoSector issuedSpecialQuantity providerAtCbAccount public
+
+rentInvoiceCanBePaidWithMixedCBDCWhenEarmarkedIsEnough : Script ()
+rentInvoiceCanBePaidWithMixedCBDCWhenEarmarkedIsEnough = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedSpecialQuantity = 1000.0
+      issuedRegularQuantity = 6000.0
+      invoicePrice = 1000.0
+  (invoiceCid, holdingCids) <-
+    invoiceCanBePaidWithMixedCBDCSetup issuedSpecialQuantity issuedRegularQuantity invoicePrice onboarding
+  (_, [resultHoldingFromEarmarkedCid], None) <- payInvoice customerAtCbAccount public invoiceCid holdingCids
+
+  assertHolding resultHoldingFromEarmarkedCid NoSector invoicePrice providerAtCbAccount public
+
+rentInvoiceCanBePaidWithMixedCBDCWhenEarmarkedIsMoreThanEnough : Script ()
+rentInvoiceCanBePaidWithMixedCBDCWhenEarmarkedIsMoreThanEnough = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedSpecialQuantity = 1100.0
+      issuedRegularQuantity = 1200.0
+      invoicePrice = 1000.0
+  (invoiceCid, holdingCids) <-
+    invoiceCanBePaidWithMixedCBDCSetup issuedSpecialQuantity issuedRegularQuantity invoicePrice onboarding
+  (_, [resultHoldingFromEarmarkedCid], None) <- payInvoice customerAtCbAccount public invoiceCid holdingCids
+
+  assertHolding resultHoldingFromEarmarkedCid NoSector invoicePrice providerAtCbAccount public
+
+rentInvoiceCanBePaidWithNormal : Script ()
+rentInvoiceCanBePaidWithNormal = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedRegularQuantity = 1200.0
+      invoicePrice = 1000.0
+  (invoiceCid, holdingCid) <-
+    invoiceCanBePaidWithNormalCDBCSetup issuedRegularQuantity invoicePrice onboarding
+  (_, [resultHoldingCid], None) <- payInvoice customerAtCbAccount public invoiceCid [holdingCid]
+
+  assertHolding resultHoldingCid NoSector invoicePrice providerAtCbAccount public
+
+rentInvoiceCannotBePaidWhenMixedCBDCIsNotEnough : Script ()
+rentInvoiceCannotBePaidWhenMixedCBDCIsNotEnough = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedSpecialQuantity = 300.0
+      issuedRegularQuantity = 200.0
+      invoicePrice = 1000.0
+  (invoiceCid, holdingCids) <-
+    invoiceCanBePaidWithMixedCBDCSetup issuedSpecialQuantity issuedRegularQuantity invoicePrice onboarding
+
+  payInvoiceFails customerAtCbAccount public invoiceCid holdingCids
+
+rentInvoiceCanBePaidWithVariousMixedCBDC : Script ()
+rentInvoiceCanBePaidWithVariousMixedCBDC = do
+  let issuedSpecialQuantity1 = 550.0
+      issuedSpecialQuantity2 = 950.0
+      issuedRegularQuantity1 = 300.0
+      extraAmount            = 90.0
+      issuedRegularQuantity2 = 700.0 + extraAmount
+      invoicePrice = 2500.0
+      invoiceDate = Date.date 2023 Date.Aug 16
+
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+
+  invoiceCid <- fst3 <$>
+    createInvoice distributor provider public customer invoicePrice invoiceDate
+  specialHoldingCid1 <-
+    issueSpecialCbdc usFRB operator public customerAtCbAccount Housing issuedSpecialQuantity1 cbInstrumentMap
+  specialHoldingCid2 <-
+    issueSpecialCbdc usFRB operator public customerAtCbAccount Housing issuedSpecialQuantity2 cbInstrumentMap
+  regularHoldingCid1 <-
+    issueCbdc usFRB operator (Some customerAtCbAccount) issuedRegularQuantity1 cbInstrumentMap
+  regularHoldingCid2 <-
+    issueCbdc usFRB operator (Some customerAtCbAccount) issuedRegularQuantity2 cbInstrumentMap
+
+  let mixedHoldingCids =
+        [regularHoldingCid1, specialHoldingCid1,
+         specialHoldingCid2, regularHoldingCid2]
+
+  (_, [resultHoldingCid, resultHoldingFromEarmarkedCid], None) <-
+    payInvoice customerAtCbAccount public invoiceCid mixedHoldingCids
+
+  let amtExpected = issuedRegularQuantity1 + issuedRegularQuantity2 - extraAmount
+  assertHolding resultHoldingCid NoSector amtExpected providerAtCbAccount public
+
+  let amtExpected = issuedSpecialQuantity1 + issuedSpecialQuantity2
+  assertHolding resultHoldingFromEarmarkedCid NoSector amtExpected providerAtCbAccount public
+
+lastPaidRentInvoiceCreatedWhenPaid : Script ()
+lastPaidRentInvoiceCreatedWhenPaid = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let invoicePrice = 1000.0
+      issuedQuantity = 1000.0
+  (invoiceCid, holdingCid) <-
+    invoiceCanBePaidWithSpecialCDBCSetup issuedQuantity invoicePrice onboarding
+
+  Some actualInvoiceContract <- queryInterfaceContractId @Invoice.I customer invoiceCid
+  (_, [_], None) <- payInvoice customerAtCbAccount public invoiceCid [holdingCid]
+  [(_, last)] <- query @LastPaidInvoice provider
+  last.invoiceV === actualInvoiceContract
+
+lastPaidRentInvoiceRemovedWhenIssuingNewInvoice : Script ()
+lastPaidRentInvoiceRemovedWhenIssuingNewInvoice = script do
+  Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let invoicePrice = 1000.0
+      invoiceDate = Date.date 2023 Date.Aug 16
+  invoiceCid <- fst3 <$>
+    createInvoice distributor provider public customer invoicePrice invoiceDate
+  holdingSpecialCid <-
+    issueSpecialCbdc usFRB operator public customerAtCbAccount Housing invoicePrice cbInstrumentMap
+  (_, [_], None) <- payInvoice customerAtCbAccount public invoiceCid [holdingSpecialCid]
+
+  -- Create a new invoice
+  createInvoice distributor provider public customer invoicePrice invoiceDate
+  last <- queryContractKey @LastPaidInvoice provider (provider, customer)
+  last === None
+
+rentInvoiceCanBePaidWithoutCertificates : Script ()
+rentInvoiceCanBePaidWithoutCertificates = do
+  onboarding@Onboarding{parties = EntitiesForTesting{..}, ..} <- setupRoleHierarchy
+  let issuedQuantity = 1000.0
+      invoicePrice = 1000.0
+      invoiceDate = Date.date 2023 Date.Aug 16
+
+  holdingCid <- issueCbdc usFRB operator (Some customerAtCbAccount) issuedQuantity cbInstrumentMap
+  invoiceCid <- createInvoiceWithoutDistributor provider public pub customerAtCbAccount
+    providerAtCbAccount invoicePrice invoiceDate
+
+  (_, [resultHoldingCid], None) <- payInvoice customerAtCbAccount public invoiceCid [holdingCid]
+  assertHolding resultHoldingCid NoSector invoicePrice providerAtCbAccount public
+
+
+---- Helpers ----
+
+invoiceCanBePaidWithSpecialCDBCSetup
+  : Decimal -> Decimal -> Onboarding
+ -> Script (ContractId Invoice.I, ContractId Fungible.I)
+invoiceCanBePaidWithSpecialCDBCSetup issuedQuantity invoicePrice
+  Onboarding{parties = EntitiesForTesting{..}, ..}
+  = do
+  let invoiceDate = Date.date 2023 Date.Aug 16
+  invoiceCid <- fst3 <$>
+    createInvoice distributor provider public customer invoicePrice invoiceDate
+  holdingCid <-
+    issueSpecialCbdc usFRB operator public customerAtCbAccount Housing issuedQuantity cbInstrumentMap
+  pure (invoiceCid, holdingCid)
+
+invoiceCanBePaidWithNormalCDBCSetup
+  : Decimal -> Decimal -> Onboarding
+ -> Script (ContractId Invoice.I, ContractId Fungible.I)
+invoiceCanBePaidWithNormalCDBCSetup issuedQuantity invoicePrice
+  Onboarding{parties = EntitiesForTesting{..}, ..}
+  = do
+  let invoiceDate = Date.date 2023 Date.Aug 16
+  invoiceCid <- fst3 <$>
+    createInvoice distributor provider public customer invoicePrice invoiceDate
+  holdingCid <-
+    issueCbdc usFRB operator (Some customerAtCbAccount) issuedQuantity cbInstrumentMap
+  pure (invoiceCid, holdingCid)
+
+invoiceCanBePaidWithMixedCBDCSetup
+  : Decimal -> Decimal -> Decimal -> Onboarding
+ -> Script (ContractId Invoice.I, [ContractId Fungible.I])
+invoiceCanBePaidWithMixedCBDCSetup issuedSpecialQuantity issuedRegularQuantity invoicePrice
+  Onboarding{parties = EntitiesForTesting{..}, ..}
+  = do
+  let invoiceDate = Date.date 2023 Date.Aug 16
+  invoiceCid <- fst3 <$>
+    createInvoice distributor provider public customer invoicePrice invoiceDate
+  holdingSpecialCid <-
+    issueSpecialCbdc usFRB operator public customerAtCbAccount Housing issuedSpecialQuantity cbInstrumentMap
+  holdingRegularCid <-
+    issueCbdc usFRB operator (Some customerAtCbAccount) issuedRegularQuantity cbInstrumentMap
+  pure (invoiceCid, [holdingSpecialCid, holdingRegularCid])

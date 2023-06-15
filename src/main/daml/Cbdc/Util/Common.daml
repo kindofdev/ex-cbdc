@@ -1,0 +1,9 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
+module Cbdc.Util.Common where
+
+assertExistence : forall t k. (TemplateKey t k) => Text -> k -> Update ()
+assertExistence msg k = assertMsg msg =<< visibleByKey @t k
+
+assertNonExistence : forall t k. (TemplateKey t k) => Text -> k -> Update ()
+assertNonExistence msg k = assertMsg msg . not =<< visibleByKey @t k

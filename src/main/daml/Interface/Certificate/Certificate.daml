@@ -1,0 +1,155 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
+module Interface.Certificate.Certificate where
+
+import Daml.Finance.Interface.Types.Common.Types (Parties, PartiesMap)
+import Daml.Finance.Interface.Util.Common
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Certificate.Types (Sector(..))
+
+-- | Type synonym for `Certificate`.
+type I = Certificate
+
+-- | Type synonym for `View`.
+type V = View
+
+-- | Type synonym for `Reference`. This type is currently used as a work-around given the lack of
+-- interface keys.
+type R = Reference
+
+-- | A unique key for Certificate.
+data CertificateKey = CertificateKey
+  with
+    provider : Party
+    distributor : Party
+    owner : Party
+    sector : Sector
+  deriving (Eq, Ord, Show)
+
+-- | View for `Certificate`.
+data View = View
+  with
+    certificateKey : CertificateKey
+  deriving (Eq, Show)
+
+-- | Convert the certificate's 'View' to its key.
+toKey : View -> CertificateKey
+toKey View {certificateKey} = certificateKey
+
+-- | Base interface for a certificate.
+interface Certificate requires Disclosure.I where
+  viewtype V
+
+  getKey : CertificateKey
+    -- ^ Get the unique key of the `Certificate`.
+  revoke : Update ()
+
+  nonconsuming choice GetView : V
+    -- ^ Retrieves the interface view.
+    with
+      viewer : Party
+       -- ^ The party retrieving the view.
+    controller viewer
+    do
+      pure $ view this
+
+  choice Revoke : ()
+      controller (view this).certificateKey.distributor
+      do
+        revoke this
+
+
+template Reference
+  with
+    certificateView : View
+      -- ^ The default view for certificates.
+    cid : ContractId Certificate
+      -- ^ The contract id of the certificate.
+    observers : PartiesMap
+  where
+    signatory certificateView.certificateKey.distributor, certificateView.certificateKey.owner
+    observer certificateView.certificateKey.provider, Disclosure.flattenObservers observers
+
+    key toKey certificateView : CertificateKey
+    maintainer key.distributor
+
+    nonconsuming choice GetCid : ContractId Certificate
+      -- ^ Get the `Certificate`'s contract id.
+      with
+        viewer : Party
+      controller viewer
+      do
+        pure cid
+
+    choice SetCid : ContractId Reference
+      -- ^ Set the certificate cid. This choice should be called only from `Certificate` implementations.
+      with
+        newCid : ContractId Certificate
+          -- ^ The account cid.
+      controller certificateView.certificateKey.distributor
+      do
+        create this with cid = newCid
+
+    choice SetObservers : ContractId Reference
+      -- ^ Set observers. This choice should be called only from `Certificate` implementations.
+      with
+        newObservers : PartiesMap
+          -- ^ The new observers.
+      controller certificateView.certificateKey.distributor
+      do
+        create this with observers = newObservers
+
+-- | Exercise interface by key.
+-- This method can be used to exercise a choice on an `Certificate` given its `CertificateKey`.
+-- Requires as input the `CertificateKey`, the actor fetching the account and the choice arguments.
+-- For example:
+-- ```
+-- exerciseInterfaceByKey @Certificate.I certificateKey actor Certificate.Revoke
+-- ```
+exerciseInterfaceByKey : forall i d r. (HasInterfaceTypeRep i, HasExercise i d r)
+  => CertificateKey -- ^ The certificate key.
+  -> Party          -- ^ The actor fetching the certificate.
+  -> d              -- ^ The choice arguments.
+  -> Update r
+exerciseInterfaceByKey k viewer arg =
+  exerciseInterfaceByKeyHelper @R @I @i k (GetCid with viewer) arg
+
+-- | Disclose certificate.
+disclose : (Text, Parties) -> Party -> Parties -> CertificateKey -> Update (ContractId I)
+disclose observersToAdd actor disclosers certificate =
+  coerceInterfaceContractId <$>
+    exerciseInterfaceByKey
+      @Disclosure.I
+      certificate
+      actor
+      Disclosure.AddObservers with disclosers; observersToAdd
+
+-- | Undisclose certificate.
+undisclose : (Text, Parties) -> Party -> Parties -> CertificateKey -> Update (Optional (ContractId I))
+undisclose observersToRemove actor disclosers certificate =
+  fmap coerceInterfaceContractId <$>
+    exerciseInterfaceByKey
+      @Disclosure.I
+      certificate
+      actor
+      Disclosure.RemoveObservers with disclosers; observersToRemove
+
+-- | HIDE
+-- Create Reference for the certificate.
+createReference : Party -> ContractId I -> Update (ContractId R)
+createReference actor cid = do
+  certificateView <- exercise cid GetView with viewer = actor
+  disclosureView <- exercise
+    (toInterfaceContractId @Disclosure.I cid)
+    Disclosure.GetView with viewer = actor
+  create Reference with certificateView; cid; observers = disclosureView.observers
+
+-- | HIDE
+-- Helper function to update the certificate reference once observers are added to the certificate.
+disclosureUpdateReference : CertificateKey -> PartiesMap -> ContractId Certificate ->
+  Update (ContractId Disclosure.I)
+disclosureUpdateReference k newObservers iCid = do
+  exerciseByKey @Reference k SetCid with newCid = iCid
+  exerciseByKey @Reference k SetObservers with newObservers
+  pure $ toInterfaceContractId iCid

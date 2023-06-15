@@ -1,0 +1,255 @@
+module Cbdc.CentralBank.Role where
+
+import DA.Assert
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import DA.Set (Set)
+import DA.Optional (fromOptional, whenSome)
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Factory qualified as Holding (F)
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible (I)
+import Daml.Finance.Interface.Types.Common.Types
+  (AccountKey(..), InstrumentKey, InstrumentQuantity, PartiesMap)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Billing.Invoice.Factory qualified as Invoice
+import Interface.Certificate.Factory qualified as Certificate
+import Interface.Certificate.Types (Sector(..))
+import Interface.Finance.Account.Factory qualified as Account
+import Interface.Finance.Instrument.Cbdc.Factory qualified as Cbdc
+import Interface.Finance.Instrument.Cbdc.Instrument qualified as Cbdc
+
+import Cbdc.Bank.Role qualified as Bank
+import Cbdc.Distributor.Role qualified as Distributor
+import Cbdc.Util.Common
+
+template Role
+  with
+    operator : Party
+    cbAtCbAccount : AccountKey
+    instrumentsAllowedToBeDebited : Set InstrumentKey
+    cbdcFactoryCid : ContractId Cbdc.F
+    accountFactoryCid : ContractId Account.F
+    holdingFactoryCid : ContractId Holding.F
+    observers : PartiesMap
+  where
+    let cb = cbAtCbAccount.owner
+
+    signatory operator, cb
+    observer Disclosure.flattenObservers observers
+    key (operator, cb) : (Party, Party)
+    maintainer key._2
+
+    ensure cbAtCbAccount.custodian == cbAtCbAccount.owner
+
+    nonconsuming choice InviteBank : ContractId BankRoleInvite
+      with
+        bankAtCbAccount : AccountKey
+      controller cb
+      do
+        create BankRoleInvite with ..
+
+    nonconsuming choice InviteUser : ContractId UserInvite
+      with
+        userAtCbAccount : AccountKey
+      controller cb
+      do
+        create UserInvite with ..
+
+    nonconsuming choice IssueCbdc : ContractId Fungible.I
+      with
+        targetAccountOpt : Optional AccountKey
+        quantity : InstrumentQuantity
+      controller cb
+      do
+        let targetAccount' = fromOptional cbAtCbAccount targetAccountOpt
+
+        -- Sanity checks
+        assertMsg "Target account custodian must be central bank" $
+          targetAccount'.custodian == cb
+        earmark <- Cbdc.getEarmark quantity.unit cb
+        assertMsg "Instrument must be a cbdc instrument non-earmarked" $
+          earmark == NoSector
+
+        whenSome targetAccountOpt $ \targetAccount ->
+          assertNonExistence @Bank.Role "It cannot be issued regular cbdc to a bank"
+            (cb, targetAccount.owner)
+
+        coerceInterfaceContractId <$> Account.exerciseInterfaceByKey @Account.I targetAccount'
+          targetAccount'.custodian Account.Credit with ..
+
+    nonconsuming choice IssueSpecialCbdc : ContractId Fungible.I
+      with
+        targetAccount : AccountKey
+        quantity : InstrumentQuantity
+      controller cb
+      do
+        -- Sanity checks
+        assertMsg "Target account custodian must be central bank" $
+          targetAccount.custodian == cb
+        assertMsg "Earmarked cbdc cannot be issued to the central bank itself" $
+          targetAccount.owner /= cb
+
+        earmark <- Cbdc.getEarmark quantity.unit cb
+        assertMsg "Instrument must be a cbdc instrument earmarked" $
+          earmark /= NoSector
+
+        assertNonExistence @Bank.Role "It cannot be issued earmarked cbdc to a bank"
+          (cb, targetAccount.owner)
+
+        coerceInterfaceContractId <$> Account.exerciseInterfaceByKey @Account.I targetAccount
+          targetAccount.custodian Account.Credit with ..
+
+    nonconsuming choice InviteDistributor : ContractId DistributorRoleInvite
+      with
+        distributor : Party
+        sector : Sector
+        certificateFactoryCid : ContractId Certificate.F
+      controller cb
+      do
+        certificateFactoryV <- view <$> fetch certificateFactoryCid
+        -- Sanity checks
+        sector =/= NoSector
+        certificateFactoryV.provider === cb
+        certificateFactoryV.distributor === distributor
+        certificateFactoryV.sector === sector
+
+        create DistributorRoleInvite with ..
+
+
+template BankRoleInvite
+  with
+    operator : Party
+    bankAtCbAccount : AccountKey
+    instrumentsAllowedToBeDebited : Set InstrumentKey
+    holdingFactoryCid : ContractId Holding.F
+    accountFactoryCid : ContractId Account.F
+  where
+    let cb = bankAtCbAccount.custodian
+        bank = bankAtCbAccount.owner
+
+    signatory cb
+    observer bank
+
+    choice BankRoleInvite_Accept : (ContractId Bank.Role, ContractId Account.I)
+      with
+        roleObservers : PartiesMap
+      controller bank
+      do
+        -- Sanity checks
+        assertExistence @Role "CentralBankRole not found" (operator, cb)
+
+        -- Create account bank@cb
+        bankAtCbAccountCid <- exercise accountFactoryCid Account.Create with
+          account = bankAtCbAccount
+          controllers = Account.Controllers with
+            outgoing = Set.singleton bank
+            incoming = Set.singleton cb
+          description = show cb <> "@" <> show cb
+          supportCreditRequest = True
+          supportDebitRequest = True
+          observers = Map.empty
+          ..
+
+        create UniqueIdGenerator with counter = 0; account = bankAtCbAccount; ..
+        roleCid <- create $ Bank.Role with observers = roleObservers; ..
+        pure (roleCid, bankAtCbAccountCid)
+
+    choice BankRoleInvite_Reject : ()
+      controller bank
+      do pure ()
+
+    choice BankRoleInvite_Withdraw : ()
+      controller cb
+      do pure ()
+
+
+template UserInvite
+  with
+    operator : Party
+    userAtCbAccount : AccountKey
+    instrumentsAllowedToBeDebited : Set InstrumentKey
+    holdingFactoryCid : ContractId Holding.F
+    accountFactoryCid : ContractId Account.F
+  where
+    let user = userAtCbAccount.owner
+        cb = userAtCbAccount.custodian
+
+    signatory cb
+    observer user
+
+    choice UserInvite_Accept : ContractId Account.I
+      controller user
+      do
+        -- Sanity checks
+        assertExistence @Role "CentralBankRole not found" (operator, cb)
+
+        -- Create account user@cb
+        exercise accountFactoryCid Account.Create with
+          account = userAtCbAccount
+          controllers = Account.Controllers with
+            outgoing = Set.singleton userAtCbAccount.owner
+            incoming = Set.singleton userAtCbAccount.custodian
+          description = show userAtCbAccount.owner <> "@" <> show userAtCbAccount.custodian
+          observers = Map.empty
+          supportCreditRequest = False
+          supportDebitRequest = True
+          ..
+
+    choice UserInvite_Reject : ()
+      controller user
+      do pure ()
+
+    choice UserInvite_Withdraw : ()
+      controller cb
+      do pure ()
+
+template DistributorRoleInvite
+  with
+    operator : Party
+    cb : Party
+    distributor : Party
+    sector : Sector
+    certificateFactoryCid : ContractId Certificate.F
+  where
+    signatory cb
+    observer distributor
+    ensure sector /= NoSector
+
+    choice DistributorRoleInvite_Accept : ContractId Distributor.Role
+      with
+        invoiceFactoryCid : ContractId Invoice.F
+        roleObservers : PartiesMap
+      controller distributor
+      do
+        -- Sanity checks
+        assertExistence @Role "CentralBankRole not found" (operator, cb)
+
+        create Distributor.Role with observers = roleObservers; ..
+
+    choice DistributorRoleInvite_Reject : ()
+      controller distributor
+      do
+        pure ()
+
+    choice DistributorRoleInvite_Withdraw : ()
+      controller cb
+      do
+        pure ()
+
+template UniqueIdGenerator
+  with
+    account : AccountKey
+    counter : Int
+  where
+    let owner = account.owner
+    signatory owner
+    key account : AccountKey
+    maintainer key.owner
+
+    choice Next : (Int, ContractId UniqueIdGenerator)
+      controller owner
+      do
+        cid <- create this with counter = counter + 1
+        pure (counter, cid)

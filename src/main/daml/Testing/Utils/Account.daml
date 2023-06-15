@@ -1,0 +1,140 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+
+module Testing.Utils.Account where
+
+import DA.List (head)
+import DA.Set qualified as Set
+import Daml.Script
+
+import Daml.Finance.Interface.Account.Account qualified as Account
+import Daml.Finance.Interface.Holding.Base qualified as BaseHolding
+import Daml.Finance.Interface.Holding.Fungible qualified as Fungible
+import Daml.Finance.Interface.Types.Common.Types
+  (AccountKey(..), Id(..), InstrumentQuantity, Parties)
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+
+import Interface.Certificate.Certificate (CertificateKey(..))
+import Interface.Finance.Account.DebitRequest (DebitRejection)
+import Interface.Finance.Account.DebitRequest qualified as DebitRequest
+import Interface.Finance.Account.Certifiable qualified as Certifiable
+import Interface.Finance.Account.CreditRequest (CreditRejection)
+import Interface.Finance.Account.CreditRequest qualified as CreditRequest
+import Interface.Finance.Account.HasFlexibleTransfer qualified as HasFlexibleTransfer
+import Interface.Finance.Account.HasHoldingRequest qualified as HasHoldingRequest
+
+import Testing.Utils.TestUtilities
+
+accountKey : Party -> Party -> AccountKey
+accountKey custodian owner = AccountKey with
+  id = Id $ show owner <> "@" <> show custodian
+  ..
+
+debit : AccountKey -> ContractId BaseHolding.I -> Script ()
+debit account holdingCid =
+  submitExerciseInterfaceByKeyCmd @Account.I [account.owner, account.custodian] []
+    account (Account.Debit with ..)
+
+debitFails : AccountKey -> ContractId BaseHolding.I -> Script ()
+debitFails account holdingCid =
+  submitMustFailExerciseInterfaceByKeyCmd @Account.I [account.owner, account.custodian] []
+    account Account.Debit with ..
+
+dicloseAccount : AccountKey -> (Text, Parties) -> Script (ContractId Account.I)
+dicloseAccount account observersToAdd = coerceInterfaceContractId @Account.I <$>
+  submitExerciseInterfaceByKeyCmd @Disclosure.I [account.owner] [] account
+    Disclosure.AddObservers with disclosers = Set.singleton account.owner; ..
+
+undicloseAccount : AccountKey -> (Text, Parties) -> Script (Optional (ContractId Account.I))
+undicloseAccount account observersToRemove = fmap coerceInterfaceContractId <$>
+  submitExerciseInterfaceByKeyCmd @Disclosure.I [account.owner] [] account
+    (Disclosure.RemoveObservers with disclosers = Set.singleton account.owner; ..)
+
+transferRegular
+  : AccountKey -> AccountKey -> (Optional Decimal) -> Party -> ContractId Fungible.I
+ -> Script (ContractId Fungible.I)
+transferRegular senderAccount receiverAccount amount public holdingCid = do
+  dicloseAccount receiverAccount ("transfer-from-sender", Set.singleton senderAccount.owner)
+  submitExerciseInterfaceByKeyCmd @HasFlexibleTransfer.I [senderAccount.owner] [public]
+    senderAccount
+    HasFlexibleTransfer.Transfer with holdingCids = [holdingCid]; isEarmarked = False; ..
+  <* undicloseAccount receiverAccount ("transfer-from-sender", Set.singleton senderAccount.owner)
+
+transferRegularFails
+  : AccountKey -> AccountKey -> (Optional Decimal) -> Party -> ContractId Fungible.I -> Script ()
+transferRegularFails senderAccount receiverAccount amount public holdingCid = do
+  let viewer = senderAccount.owner
+  cid <- submitMulti [viewer] [public] $
+    exerciseByKeyCmd @Account.R senderAccount (Account.GetCid with ..)
+  submitMultiMustFail [viewer] [public] $
+    exerciseCmd (coerceInterfaceContractId @HasFlexibleTransfer.I cid)
+      HasFlexibleTransfer.Transfer with holdingCids = [holdingCid]; isEarmarked = False; ..
+
+requestCredit : AccountKey -> InstrumentQuantity -> Script (ContractId CreditRequest.I)
+requestCredit account quantity =
+  submitExerciseInterfaceByKeyCmd @HasHoldingRequest.I [account.owner] []
+    account (HasHoldingRequest.RequestCredit with ..)
+
+requestCreditFails : AccountKey -> Party -> InstrumentQuantity -> Script ()
+requestCreditFails account public quantity = do
+  let owner = account.owner
+  cid <- submitMulti [owner] [public] $
+    exerciseByKeyCmd @Account.R account (Account.GetCid with viewer = owner)
+  submitMustFail owner $
+    exerciseCmd (coerceInterfaceContractId @HasHoldingRequest.I cid)
+      HasHoldingRequest.RequestCredit with ..
+
+acceptCreditRequest
+  : AccountKey -> ContractId CreditRequest.I
+ -> Script (ContractId Fungible.I)
+acceptCreditRequest account requestCid =
+  submitExerciseInterfaceByKeyCmd @HasHoldingRequest.I [account.custodian] []
+    account (HasHoldingRequest.AcceptCredit with ..)
+
+rejectCreditRequest
+  : AccountKey -> Text -> ContractId CreditRequest.I
+ -> Script (ContractId CreditRejection)
+rejectCreditRequest account reason requestCid =
+  submitExerciseInterfaceByKeyCmd @HasHoldingRequest.I [account.custodian] []
+    account (HasHoldingRequest.RejectCredit with ..)
+
+requestDebit : AccountKey -> ContractId BaseHolding.I -> Script (ContractId DebitRequest.I)
+requestDebit account holdingCid =
+  submitExerciseInterfaceByKeyCmd @HasHoldingRequest.I [account.owner] []
+    account (HasHoldingRequest.RequestDebit with ..)
+
+acceptDebitRequest
+  : AccountKey -> ContractId DebitRequest.I
+ -> Script ()
+acceptDebitRequest account requestCid =
+  submitExerciseInterfaceByKeyCmd @HasHoldingRequest.I [account.custodian] []
+    account (HasHoldingRequest.AcceptDebit with ..)
+
+rejectDebitRequest
+  : AccountKey -> Text -> ContractId DebitRequest.I
+ -> Script (ContractId DebitRejection)
+rejectDebitRequest account reason requestCid =
+  submitExerciseInterfaceByKeyCmd @HasHoldingRequest.I [account.custodian] []
+    account (HasHoldingRequest.RejectDebit with ..)
+
+getAccountCertificate : AccountKey -> Script (Optional CertificateKey)
+getAccountCertificate account = (.certificateKeyOpt) <$>
+  submitExerciseInterfaceByKeyCmd @Certifiable.I [account.owner] []
+    account (Certifiable.GetView with viewer = account.owner)
+
+-- | Utilty function for exercising an interface by key.
+submitExerciseInterfaceByKeyCmd : forall t2 c2 b.
+  (HasInterfaceTypeRep t2, HasTemplateTypeRep t2, HasToAnyTemplate t2, HasFromAnyTemplate t2,
+   HasFromAnyChoice t2 c2 b, HasToAnyChoice t2 c2 b, HasExercise t2 c2 b)
+   => [Party] -> [Party] -> AccountKey -> c2 -> Script b
+submitExerciseInterfaceByKeyCmd actAs readAs k arg =
+  submitExerciseInterfaceByKeyCmdHelper @Account.R @t2 actAs readAs k
+  (Account.GetCid with viewer = head actAs) arg
+
+-- | Utilty function for exercising an interface by key.
+submitMustFailExerciseInterfaceByKeyCmd : forall t2 c2.
+  (HasInterfaceTypeRep t2, HasTemplateTypeRep t2, HasToAnyTemplate t2, HasFromAnyTemplate t2,
+   HasFromAnyChoice t2 c2 (), HasToAnyChoice t2 c2 (), HasExercise t2 c2 ())
+   => [Party] -> [Party] -> AccountKey -> c2 -> Script ()
+submitMustFailExerciseInterfaceByKeyCmd actAs readAs k arg =
+  submitMustFailExerciseInterfaceByKeyCmdHelper @Account.R @t2 actAs readAs k
+  (Account.GetCid with viewer = head actAs) arg
